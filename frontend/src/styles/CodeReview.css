@@ -1,0 +1,78 @@
+/* ── Code textarea ───────────────────────────────────────────────────────── */
+.code-textarea {
+  resize: vertical;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  background-color: #0f172a;
+  color: #e2e8f0;
+  border-color: #334155;
+  min-height: 320px;
+}
+
+.code-textarea:focus {
+  background-color: #0f172a;
+  color: #e2e8f0;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 0.2rem rgba(99, 102, 241, 0.25);
+}
+
+/* ── Review results panel ────────────────────────────────────────────────── */
+.review-results {
+  animation: fadeSlideIn 0.25s ease-out;
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+/* ── Issue cards ─────────────────────────────────────────────────────────── */
+.issue-card {
+  transition: box-shadow 0.15s;
+}
+
+.issue-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.09) !important;
+}
+
+.issue-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 340px;
+}
+
+/* ── Recommendation box ──────────────────────────────────────────────────── */
+.recommendation-box {
+  background-color: #f0fdf4;
+  border: 1px solid #bbf7d0;
+}
+
+/* ── Feedback panel ──────────────────────────────────────────────────────── */
+.issue-feedback-panel {
+  border-color: #e2e8f0 !important;
+}
+
+.feedback-confirmed {
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+/* Active state for feedback buttons */
+.btn-outline-success.active  { background-color: #16a34a; color: #fff; border-color: #16a34a; }
+.btn-outline-danger.active   { background-color: #dc2626; color: #fff; border-color: #dc2626; }
+.btn-outline-warning.active  { background-color: #d97706; color: #fff; border-color: #d97706; }
+
+/* ── Fix code viewer ─────────────────────────────────────────────────────── */
+.fix-panel .fix-code-block {
+  background-color: #0f172a;
+  color: #e2e8f0;
+  padding: 1rem 1.25rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  font-size: 0.82rem;
+  line-height: 1.7;
+  max-height: 480px;
+  overflow-y: auto;
+  white-space: pre;
+}

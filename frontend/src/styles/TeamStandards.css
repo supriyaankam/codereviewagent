@@ -1,0 +1,16 @@
+.standard-card {
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+
+.standard-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1) !important;
+  transform: translateY(-1px);
+}
+
+.standard-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.5;
+}

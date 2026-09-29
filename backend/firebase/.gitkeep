@@ -1,0 +1,5 @@
+# Place your Firebase service-account JSON here:
+# backend/firebase/serviceAccountKey.json
+#
+# This file is kept in git to preserve the directory.
+# serviceAccountKey.json is listed in .gitignore and will NOT be committed.
