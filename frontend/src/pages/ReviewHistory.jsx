@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { getReviewDetailPath, getSavedIssueCount } from '../services/reviewService';
 
 const RISK_COLOR = {
   critical: 'danger',
@@ -22,13 +23,15 @@ export default function ReviewHistory() {
     setLoading(true);
     setError('');
     try {
+      const token = await currentUser.getIdToken();
       const res = await fetch(
-        `/api/reviews?user_id=${encodeURIComponent(currentUser.uid)}`
+        `/api/reviews?user_id=${encodeURIComponent(currentUser.uid)}`,
+        { headers: { Authorization: `Bearer ${token}` } },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setReviews(Array.isArray(data) ? data : []);
-    } catch (err) {
+    } catch {
       setError('Could not load review history. Is the backend running?');
     } finally {
       setLoading(false);
@@ -124,6 +127,7 @@ export default function ReviewHistory() {
               <tbody>
                 {reviews.map((rev) => {
                   const riskColor = RISK_COLOR[rev.overall_risk] ?? 'secondary';
+                  const issueCount = getSavedIssueCount(rev);
                   const date = rev.created_at
                     ? new Date(rev.created_at).toLocaleDateString(undefined, {
                         month: 'short', day: 'numeric', year: 'numeric',
@@ -131,8 +135,10 @@ export default function ReviewHistory() {
                     : '—';
                   return (
                     <tr key={rev.id}>
-                      <td className="ps-4 fw-medium text-dark">
-                        {rev.project_name || '—'}
+                      <td className="ps-4 fw-medium">
+                        <Link to={getReviewDetailPath(rev.id)}>
+                          {rev.project_name || '—'}
+                        </Link>
                       </td>
                       <td>
                         <span className="badge bg-light text-secondary border">
@@ -147,8 +153,8 @@ export default function ReviewHistory() {
                         ) : <span className="text-muted">—</span>}
                       </td>
                       <td>
-                        <span className={`fw-medium ${(rev.issues_count ?? 0) > 0 ? 'text-danger' : 'text-success'}`}>
-                          {rev.issues_count ?? 0}
+                        <span className={`fw-medium ${issueCount === null ? 'text-muted' : issueCount > 0 ? 'text-danger' : 'text-success'}`}>
+                          {issueCount ?? '—'}
                         </span>
                       </td>
                       <td>

@@ -31,8 +31,15 @@ export default function Register() {
     }
     setLoading(true);
     try {
-      await registerUser(form.name.trim(), form.email.trim(), form.password);
-      navigate('/dashboard', { replace: true });
+      const { profileWarnings } = await registerUser(
+        form.name.trim(),
+        form.email.trim(),
+        form.password,
+      );
+      navigate('/dashboard', {
+        replace: true,
+        state: profileWarnings.length ? { accountWarning: profileWarnings.join(' ') } : undefined,
+      });
     } catch (err) {
       setError(friendlyError(err.code));
     } finally {
@@ -79,6 +86,7 @@ export default function Register() {
                 className="form-control" placeholder="Jane Smith"
                 value={form.name} onChange={handleChange}
                 autoComplete="name"
+                required
               />
             </div>
 
@@ -89,6 +97,7 @@ export default function Register() {
                 className="form-control" placeholder="you@company.com"
                 value={form.email} onChange={handleChange}
                 autoComplete="email"
+                required
               />
             </div>
 
@@ -99,6 +108,8 @@ export default function Register() {
                 className="form-control" placeholder="Min. 6 characters"
                 value={form.password} onChange={handleChange}
                 autoComplete="new-password"
+                minLength={6}
+                required
               />
             </div>
 
@@ -109,6 +120,8 @@ export default function Register() {
                 className="form-control" placeholder="••••••••"
                 value={form.confirm} onChange={handleChange}
                 autoComplete="new-password"
+                minLength={6}
+                required
               />
             </div>
 
@@ -131,10 +144,20 @@ export default function Register() {
 
 function friendlyError(code) {
   switch (code) {
-    case 'auth/email-already-in-use':   return 'An account with this email already exists.';
+    case 'auth/email-already-in-use':   return 'An account with this email already exists. Use the Sign in link below.';
     case 'auth/invalid-email':          return 'Please enter a valid email address.';
     case 'auth/weak-password':          return 'Password must be at least 6 characters.';
     case 'auth/network-request-failed': return 'Network error. Check your connection and try again.';
+    case 'auth/operation-not-allowed':
+      return 'Email/password sign-up is disabled for this Firebase project. Enable the Email/Password provider in Firebase Authentication settings.';
+    case 'auth/unauthorized-domain':
+      return 'This site is not authorized for Firebase sign-in. Add localhost to the authorized domains in Firebase Authentication settings.';
+    case 'auth/invalid-api-key':
+    case 'auth/app-not-authorized':
+    case 'auth/configuration-not-found':
+      return 'Firebase Authentication is not configured correctly for this app. Check the frontend Firebase settings and Authentication provider.';
+    case 'auth/too-many-requests':
+      return 'Too many registration attempts. Wait a while and try again.';
     default:                            return 'Registration failed. Please try again.';
   }
 }

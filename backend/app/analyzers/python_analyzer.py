@@ -15,6 +15,7 @@ import sys
 import tempfile
 import os
 import textwrap
+from contextlib import redirect_stdout
 from typing import Any
 
 from pylint.lint import Run as PylintRun
@@ -129,11 +130,52 @@ _PYLINT_CATEGORY_FALLBACK: dict[str, Category] = {
 
 # ── AST helpers ───────────────────────────────────────────────────────────────
 
+class _ScopeBindingCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.names.add(node.id)
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        self.names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+        self.names.update(alias.asname or alias.name for alias in node.names)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self.names.add(node.name)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        self.names.add(node.name)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:  # noqa: N802
+        if node.name:
+            self.names.add(node.name)
+        self.generic_visit(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return
+
+
+def _bound_names(nodes: list[ast.stmt]) -> set[str]:
+    collector = _ScopeBindingCollector()
+    for node in nodes:
+        collector.visit(node)
+    return collector.names
+
+
 class _ASTVisitor(ast.NodeVisitor):
     """Single-pass AST walker that collects multiple issue types."""
 
-    def __init__(self) -> None:
+    def __init__(self, tree: ast.Module) -> None:
         self.issues: list[Issue] = []
+        self._module_names = _bound_names(tree.body)
+        self._function_names: list[set[str]] = []
+        self._class_names: list[set[str]] = []
 
     # ── dangerous built-in calls ────────────────────────────────────────────
 
@@ -142,20 +184,19 @@ class _ASTVisitor(ast.NodeVisitor):
                        "Never use eval() on untrusted input. Consider safer alternatives like ast.literal_eval()."),
         "exec":       ("Use of exec()", "exec() executes arbitrary code strings.",
                        "Remove exec() calls. Refactor to explicit function calls."),
-        "compile":    ("Use of compile()", "compile() compiles source code at runtime.",
-                       "Avoid compile() on user-supplied input."),
-        "__import__": ("Dynamic __import__", "__import__() dynamically imports modules at runtime.",
-                       "Use explicit import statements instead."),
     }
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         name = None
         if isinstance(node.func, ast.Name):
             name = node.func.id
-        elif isinstance(node.func, ast.Attribute):
-            name = node.func.attr
 
-        if name in self._DANGEROUS_CALLS:
+        shadowed = name in self._module_names or any(
+            name in scope for scope in self._function_names
+        )
+        if not self._function_names:
+            shadowed = shadowed or any(name in scope for scope in self._class_names)
+        if name in self._DANGEROUS_CALLS and not shadowed:
             title, desc, rec = self._DANGEROUS_CALLS[name]
             self.issues.append(Issue(
                 category=Category.security,
@@ -167,6 +208,36 @@ class _ASTVisitor(ast.NodeVisitor):
                 source="ast",
             ))
         self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        for expression in (*node.decorator_list, *node.bases):
+            self.visit(expression)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        self._class_names.append(_bound_names(node.body))
+        for statement in node.body:
+            self.visit(statement)
+        self._class_names.pop()
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        for default in node.args.defaults + node.args.kw_defaults:
+            if default is not None:
+                self.visit(default)
+        local_names = {
+            argument.arg
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+        }
+        if node.args.vararg:
+            local_names.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            local_names.add(node.args.kwarg.arg)
+        self._function_names.append(local_names)
+        self.visit(node.body)
+        self._function_names.pop()
 
     # ── bare except ─────────────────────────────────────────────────────────
 
@@ -186,9 +257,44 @@ class _ASTVisitor(ast.NodeVisitor):
     # ── mutable default arguments ────────────────────────────────────────────
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        for expression in node.decorator_list:
+            self.visit(expression)
+        for default in node.args.defaults + node.args.kw_defaults:
+            if default is not None:
+                self.visit(default)
+        for argument in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ):
+            if argument.annotation:
+                self.visit(argument.annotation)
+        if node.args.vararg and node.args.vararg.annotation:
+            self.visit(node.args.vararg.annotation)
+        if node.args.kwarg and node.args.kwarg.annotation:
+            self.visit(node.args.kwarg.annotation)
+        if node.returns:
+            self.visit(node.returns)
+
+        local_names = _bound_names(node.body)
+        local_names.update(
+            argument.arg
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+        )
+        if node.args.vararg:
+            local_names.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            local_names.add(node.args.kwarg.arg)
+        self._function_names.append(local_names)
         self._check_mutable_defaults(node)
         self._check_function_complexity(node)
-        self.generic_visit(node)
+        for statement in node.body:
+            self.visit(statement)
+        self._function_names.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef  # same checks apply
 
@@ -250,26 +356,6 @@ class _ASTVisitor(ast.NodeVisitor):
         ))
         self.generic_visit(node)
 
-    # ── print() calls (info only) ────────────────────────────────────────────
-
-    def visit_Expr(self, node: ast.Expr) -> None:  # noqa: N802
-        if (
-            isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Name)
-            and node.value.func.id == "print"
-        ):
-            self.issues.append(Issue(
-                category=Category.quality,
-                severity=Severity.info,
-                title="print() call detected",
-                description="print() statements are typically for debugging and should not appear in production code.",
-                recommendation="Replace with proper logging using the `logging` module.",
-                line=node.lineno,
-                source="ast",
-            ))
-        self.generic_visit(node)
-
-
 # ── Syntax check ─────────────────────────────────────────────────────────────
 
 def check_syntax(code: str) -> list[Issue]:
@@ -299,7 +385,7 @@ def run_ast_analysis(code: str) -> list[Issue]:
     except SyntaxError:
         return []   # syntax errors are reported separately
 
-    visitor = _ASTVisitor()
+    visitor = _ASTVisitor(tree)
     visitor.visit(tree)
     return visitor.issues
 
@@ -340,12 +426,12 @@ def run_pylint_analysis(code: str) -> list[Issue]:
         ]
 
         try:
-            PylintRun(pylint_args, reporter=reporter, exit=False)
+            with redirect_stdout(output_buf):
+                PylintRun(pylint_args, reporter=reporter, exit=False)
         except SystemExit:
             pass
 
-        output_buf.seek(0)
-        raw = output_buf.read().strip()
+        raw = output_buf.getvalue().strip()
         if not raw:
             return []
 

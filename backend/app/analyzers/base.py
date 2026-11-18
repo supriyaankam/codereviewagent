@@ -32,6 +32,9 @@ class Issue:
     line:           int = 0
     source:         str = "static"   # "ast" | "pylint" | "bandit" | "secrets" | "ai" | "syntax"
     column:         int = 0
+    team_standard:  bool = False
+    standard_id:    str = ""
+    standard_name:  str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -43,4 +46,7 @@ class Issue:
             "line":           self.line,
             "source":         self.source,
             "column":         self.column,
+            "team_standard":  self.team_standard,
+            "standard_id":    self.standard_id,
+            "standard_name":  self.standard_name,
         }

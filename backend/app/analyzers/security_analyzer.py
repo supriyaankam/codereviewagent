@@ -1,14 +1,18 @@
 """
-Security analyzer — Bandit pass + regex-based hardcoded-secret detection.
+Security analyzer — Bandit pass + syntax-aware hardcoded-secret detection.
 
 SAFETY: submitted code is NEVER executed.
   - Bandit runs via its Python API against a tempfile; the file is never imported.
-  - Regex patterns only inspect the raw source string.
+  - Secret patterns only inspect parsed string-literal assignments.
 """
 
 import os
 import re
 import tempfile
+import ast
+import io
+import logging
+import tokenize
 from dataclasses import dataclass
 
 import bandit
@@ -16,7 +20,9 @@ from bandit.core import manager as bandit_manager
 from bandit.core import config as bandit_config
 
 from app.analyzers.base import Issue, Severity, Category
+from app.analyzers.language_analyzer import literal_assignments, literal_strings
 
+logger = logging.getLogger(__name__)
 
 # ── Bandit severity / confidence → our Severity ──────────────────────────────
 
@@ -115,13 +121,14 @@ def run_bandit_analysis(code: str) -> list[Issue]:
                 source="bandit",
                 column=issue.col_offset if hasattr(issue, "col_offset") else 0,
             ))
-    except Exception:  # noqa: BLE001 — never let analysis crash the endpoint
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[bandit] static analysis failed  error_type=%s", type(exc).__name__)
+        raise RuntimeError("Bandit static analysis failed.") from exc
     finally:
         try:
             os.unlink(tmp_path)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("[bandit] temporary file cleanup failed  error_type=%s", type(exc).__name__)
 
     return issues
 
@@ -204,29 +211,93 @@ def _bandit_recommendation(test_id: str) -> str:
 
 # ── Regex secret detection ────────────────────────────────────────────────────
 
-def run_secret_detection(code: str) -> list[Issue]:
+def run_secret_detection(code: str, language: str = "python") -> list[Issue]:
     """
-    Scan raw source text for hardcoded secrets using regex patterns.
-    Never executes code; operates entirely on strings.
+    Find literal credentials from parsed assignments, excluding comments and examples.
     """
-    issues: list[Issue] = []
-    lines = code.splitlines()
+    assignments = literal_assignments(language, code)
+    literals = literal_strings(language, code)
+    if assignments is None or literals is None:
+        if language.strip().lower() not in {"python", "py"}:
+            return []
+        lines = code.splitlines(keepends=True)
+        try:
+            for token in tokenize.generate_tokens(io.StringIO(code).readline):
+                    if token.type == tokenize.COMMENT:
+                        row, column = token.start
+                        end_row, end_column = token.end
+                        if row == end_row:
+                            line = lines[row - 1]
+                            lines[row - 1] = (
+                                line[:column]
+                                + " " * (end_column - column)
+                                + line[end_column:]
+                            )
+        except (tokenize.TokenError, IndentationError):
+            pass
+        issues = []
+        for lineno, line in enumerate(lines, start=1):
+            for pattern in _SECRET_PATTERNS:
+                if pattern.pattern.search(line):
+                    issues.append(_secret_issue(pattern, lineno))
+                    break
+        return issues
 
-    for lineno, line in enumerate(lines, start=1):
-        # Skip obvious test / example / placeholder lines
-        if re.search(r'(?i)(example|placeholder|your[_\-]?key|changeme|<.*?>)', line):
+    issues: list[Issue] = []
+    seen_lines: set[int] = set()
+    for name, raw_value, lineno in assignments:
+        if _is_placeholder(_literal_value(raw_value)):
             continue
-        for sp in _SECRET_PATTERNS:
-            if sp.pattern.search(line):
-                issues.append(Issue(
-                    category=Category.security,
-                    severity=Severity.critical,
-                    title=sp.name,
-                    description=f"Possible hardcoded secret detected on line {lineno}.",
-                    recommendation=sp.recommendation,
-                    line=lineno,
-                    source="secrets",
-                ))
-                break  # one issue per line is enough
+        candidate = f"{name} = {raw_value}"
+        pattern = next((item for item in _SECRET_PATTERNS if item.pattern.search(candidate)), None)
+        if pattern:
+            issues.append(_secret_issue(pattern, lineno))
+            seen_lines.add(lineno)
+
+    for raw_value, lineno in literals:
+        if lineno in seen_lines:
+            continue
+        pattern = next(
+            (
+                item for item in _SECRET_PATTERNS
+                if item.name in {"Hardcoded AWS access key ID", "Hardcoded private key block"}
+                and item.pattern.search(raw_value)
+            ),
+            None,
+        )
+        if pattern:
+            issues.append(_secret_issue(pattern, lineno))
+            seen_lines.add(lineno)
 
     return issues
+
+
+def _literal_value(raw_value: str) -> str:
+    try:
+        value = ast.literal_eval(raw_value)
+    except (SyntaxError, ValueError):
+        return raw_value.strip("`'\"")
+    return value if isinstance(value, str) else raw_value
+
+
+_SECRET_PLACEHOLDER = re.compile(
+    r"(?i)^(?:change(?:me)?|replace(?:_?me)?|your(?:[_ -].*)?|"
+    r"example(?:[_ -].*)?|placeholder|dummy|sample|test|fake|none|null|"
+    r"\*{3,}|<[^>]+>|\$\{[^}]+\})$"
+)
+
+
+def _is_placeholder(value: str) -> bool:
+    return bool(_SECRET_PLACEHOLDER.fullmatch(value.strip()))
+
+
+def _secret_issue(pattern: _SecretPattern, line: int) -> Issue:
+    return Issue(
+        category=Category.security,
+        severity=Severity.critical,
+        title=pattern.name,
+        description=f"Possible hardcoded secret detected on line {line}.",
+        recommendation=pattern.recommendation,
+        line=line,
+        source="secrets",
+    )

@@ -64,9 +64,6 @@ export default function Layout() {
                   <div className="small fw-medium text-truncate" style={{ color: '#f1f5f9' }}>
                     {currentUser.displayName ?? 'User'}
                   </div>
-                  <div className="text-truncate" style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
-                    {currentUser.email}
-                  </div>
                 </div>
               </div>
             </div>

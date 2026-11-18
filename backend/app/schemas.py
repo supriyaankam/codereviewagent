@@ -42,12 +42,48 @@ class CodeReviewResponse(BaseModel):
     # Issue counts (populated when review is completed)
     overall_risk:   Optional[str] = None
     summary:        Optional[str] = None
-    issues_count:   int = 0
-    critical_count: int = 0
-    warning_count:  int = 0
-    info_count:     int = 0
+    issues_count:   Optional[int] = None
+    critical_count: Optional[int] = None
+    warning_count:  Optional[int] = None
+    info_count:     Optional[int] = None
     created_at:     Optional[str] = None
     updated_at:     Optional[str] = None
+
+
+class ReviewSessionResponse(CodeReviewResponse):
+    review_id: Optional[str] = None
+    completed_at: Optional[str] = None
+    ai_issues: list[dict] = Field(default_factory=list)
+    static_issues: list[dict] = Field(default_factory=list)
+    ai_summary: Optional[str] = None
+    ai_failure_reason: Optional[str] = None
+    ai_failure_category: Optional[str] = None
+    static_analysis_error: Optional[str] = None
+    static_summary: Optional[dict] = None
+    static_supported: Optional[bool] = None
+    static_metadata: Optional[dict] = None
+    quality_score: Optional[dict] = None
+    ai_available: Optional[bool] = None
+    ai_code_truncated: bool = False
+    fallback_reason: Optional[str] = None
+    total_issue_count: Optional[int] = None
+    error_count: Optional[int] = None
+    analysis_status: Optional[str] = None
+    feedback: list[dict] = Field(default_factory=list)
+    auto_fix: Optional[dict] = None
+
+
+class ReviewAutoFixUpdate(BaseModel):
+    fixed_code: str = Field(..., min_length=1, max_length=100_000)
+    original_code: str = Field(..., min_length=1, max_length=100_000)
+    changes: list[dict] = Field(default_factory=list, max_length=100)
+    summary: str = Field(default="", max_length=5000)
+    source_language: str = Field(default="", max_length=60)
+    target_language: str = Field(default="", max_length=60)
+    is_conversion: bool = False
+    reanalysis: Optional[dict] = None
+    validation: dict = Field(default_factory=dict)
+    accepted: bool = False
 
 
 # ── feedback ──────────────────────────────────────────────────────────────────
@@ -95,8 +131,12 @@ STANDARD_CATEGORIES = (
 
 class TeamStandardCreate(BaseModel):
     title:       str = Field(..., min_length=1, max_length=200)
+    name:        Optional[str] = Field(default=None, max_length=200)
     description: str = Field(..., min_length=1, max_length=2000)
     category:    str = Field(default="general", max_length=60)
+    severity:    str = Field(default="warning", pattern="^(critical|error|warning|info)$")
+    recommended_solution: str = Field(default="", max_length=2000)
+    enabled:     bool = True
     project_id:  str = Field(default="global",
                              description="Firestore project ID or 'global'")
     created_by:  str = Field(..., description="Firebase UID of the creator")
@@ -106,13 +146,20 @@ class TeamStandardUpdate(BaseModel):
     title:       str = Field(..., min_length=1, max_length=200)
     description: str = Field(..., min_length=1, max_length=2000)
     category:    str = Field(default="general", max_length=60)
+    severity:    str = Field(default="warning", pattern="^(critical|error|warning|info)$")
+    recommended_solution: str = Field(default="", max_length=2000)
+    enabled:     bool = True
 
 
 class TeamStandardResponse(BaseModel):
     id:          str
     title:       str
+    name:        str = ""
     description: str
     category:    str
+    severity:    str = "warning"
+    recommended_solution: str = ""
+    enabled:     bool = True
     project_id:  str = ""
     created_by:  str = ""
     created_at:  Optional[str] = None
@@ -123,7 +170,7 @@ class TeamStandardResponse(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     language: str = Field(..., min_length=1, max_length=60)
-    code: str     = Field(..., min_length=1)
+    code: str     = Field(..., min_length=1, max_length=100_000)
 
 
 class AnalysisIssue(BaseModel):
@@ -135,6 +182,9 @@ class AnalysisIssue(BaseModel):
     line:           int = 0
     source:         str = "static"
     column:         int = 0
+    team_standard:  bool = False
+    standard_id:    str = ""
+    standard_name:  str = ""
 
 
 class AnalysisSummaryCounts(BaseModel):
@@ -148,6 +198,7 @@ class AnalysisSummaryCounts(BaseModel):
 class AnalysisSummary(BaseModel):
     counts:      AnalysisSummaryCounts
     by_category: dict[str, int] = {}
+    by_source:   dict[str, int] = {}
 
 
 class AnalyzeResponse(BaseModel):
@@ -165,7 +216,7 @@ class ReviewRequest(BaseModel):
     project_id:   str = Field(default="", description="Firestore project doc ID (optional)")
     project_name: str = Field(..., min_length=1, max_length=120)
     language:     str = Field(..., min_length=1, max_length=60)
-    code:         str = Field(..., min_length=1)
+    code:         str = Field(..., min_length=1, max_length=100_000)
 
 
 class AIIssue(BaseModel):
@@ -176,17 +227,32 @@ class AIIssue(BaseModel):
     recommendation: str
     line:           int = 0
     source:         str = "ai"
+    confidence:     str = "medium"
+    beginner_explanation: dict[str, str] = Field(default_factory=dict)
 
 
 class ReviewResponse(BaseModel):
     review_id:      str
     language:       str
     project_name:   str
-    overall_risk:   str
+    overall_risk:   Optional[str] = None
     summary:        str
+    ai_summary:     Optional[str] = None
     ai_issues:      list[AIIssue]
     static_issues:  list[AnalysisIssue]
-    static_summary: AnalysisSummary
+    static_summary: Optional[dict] = None
+    static_supported: Optional[bool] = None
+    static_metadata: Optional[dict] = None
+    quality_score:  Optional[dict] = None
+    ai_code_truncated: bool = False
     ai_available:   bool
     fallback_reason: Optional[str] = None
+    ai_failure_category: Optional[str] = None
+    static_analysis_error: Optional[str] = None
+    total_issue_count: Optional[int] = None
+    critical_count: Optional[int] = None
+    warning_count: Optional[int] = None
+    info_count: Optional[int] = None
+    error_count: Optional[int] = None
+    analysis_status: str
     saved_to_db:    bool = False

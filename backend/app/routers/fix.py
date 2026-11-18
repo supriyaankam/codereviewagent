@@ -10,28 +10,300 @@ Both endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import io
+import json
 import zipfile
 import logging
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from firebase_admin import auth as firebase_auth
+from pydantic import BaseModel, Field, ValidationError
 from typing import Optional
 
+from app.auth import require_authenticated_user
 from app.services.code_analyzer import analyze_code
 from app.services.auto_fix_service import auto_fix_code, auto_fix_multiple
-from app.services.upload_service import read_single_file, read_zip_archive
+from app.services.firebase_service import firebase_available, get_team_standards_for_user
+from app.services.upload_service import (
+    MAX_FILE_BYTES,
+    MAX_ZIP_BYTES,
+    read_single_file,
+    read_zip_archive,
+)
+from app.services import project_upload_service
+from app.services.project_upload_service import ProjectUploadError
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/fix", tags=["auto-fix"])
 
 
+require_project_upload_user = require_authenticated_user
+
+
+def _upload_error(exc: ProjectUploadError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+async def _read_limited_json(request: Request, maximum_bytes: int) -> object:
+    content = bytearray()
+    async for request_chunk in request.stream():
+        if len(content) + len(request_chunk) > maximum_bytes:
+            limit = (
+                f"{maximum_bytes // 1024} KiB"
+                if maximum_bytes < 1024 * 1024
+                else f"{maximum_bytes // (1024 * 1024)} MiB"
+            )
+            raise HTTPException(
+                status_code=413,
+                detail=f"Request metadata exceeds the {limit} limit.",
+            )
+        content.extend(request_chunk)
+    try:
+        return json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail="Request body must be valid JSON.") from exc
+
+
+class ProjectUploadFile(BaseModel):
+    path: str = Field(..., min_length=1, max_length=1024)
+    size: int = Field(..., ge=0, strict=True)
+
+
+class ProjectUploadCreate(BaseModel):
+    name: str = Field(default="project", max_length=200)
+    files: list[ProjectUploadFile] = Field(..., min_length=1, max_length=project_upload_service.MAX_PROJECT_FILES)
+
+
+class ProjectAnalyzeRequest(BaseModel):
+    file_indices: list[int] = Field(..., min_length=1, max_length=project_upload_service.MAX_ANALYSIS_FILES)
+    reset: bool = False
+    selected_file_indices: list[int] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=project_upload_service.MAX_ANALYSIS_FILES,
+    )
+
+
+class ProjectFixSuggestionRequest(BaseModel):
+    file_index: int = Field(..., ge=0)
+    issue_index: int = Field(..., ge=0)
+
+
+class ProjectFixApplyRequest(BaseModel):
+    allow_validation_override: bool = False
+
+
+@router.post("/project-uploads/archive", status_code=201)
+async def upload_project_archive(
+    file: UploadFile = File(...),
+    user_id: str = Depends(require_project_upload_user),
+):
+    filename = file.filename or "project.zip"
+    if not filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=422, detail="Choose a ZIP project archive.")
+    if file.size is not None and file.size > MAX_ZIP_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"ZIP file exceeds the {MAX_ZIP_BYTES // (1024 * 1024)} MB upload limit.",
+        )
+    await file.seek(0)
+    try:
+        return await asyncio.to_thread(
+            project_upload_service.create_upload_from_archive_file,
+            user_id,
+            filename,
+            file.file,
+        )
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.post("/project-uploads", status_code=201)
+async def create_project_upload(
+    request: Request,
+    user_id: str = Depends(require_project_upload_user),
+):
+    payload = await _read_limited_json(request, 4 * 1024 * 1024)
+    try:
+        body = ProjectUploadCreate.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_input=False)) from exc
+    try:
+        return await asyncio.to_thread(
+            project_upload_service.create_upload,
+            user_id,
+            body.name,
+            [file.model_dump() for file in body.files],
+        )
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.get("/project-uploads/{upload_id}")
+def get_project_upload(
+    upload_id: str,
+    user_id: str = Depends(require_project_upload_user),
+):
+    try:
+        return project_upload_service.upload_status(upload_id, user_id)
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.put("/project-uploads/{upload_id}/files/{file_index}/chunks/{chunk_index}")
+async def put_project_upload_chunk(
+    upload_id: str,
+    file_index: int,
+    chunk_index: int,
+    request: Request,
+    chunk_sha256: str = Header(..., alias="X-Chunk-SHA256"),
+    user_id: str = Depends(require_project_upload_user),
+):
+    data = bytearray()
+    maximum_chunk_bytes = project_upload_service.chunk_bytes()
+    async for request_chunk in request.stream():
+        if len(data) + len(request_chunk) > maximum_chunk_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Chunk exceeds the configured {maximum_chunk_bytes // (1024 * 1024)} MB chunk limit.",
+            )
+        data.extend(request_chunk)
+    try:
+        return await asyncio.to_thread(
+            project_upload_service.save_chunk,
+            upload_id,
+            user_id,
+            file_index,
+            chunk_index,
+            bytes(data),
+            chunk_sha256,
+        )
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.post("/project-uploads/{upload_id}/complete")
+def complete_project_upload(
+    upload_id: str,
+    user_id: str = Depends(require_project_upload_user),
+):
+    try:
+        return project_upload_service.complete_upload(upload_id, user_id)
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.get("/project-uploads/{upload_id}/files")
+def list_project_upload_files(
+    upload_id: str,
+    user_id: str = Depends(require_project_upload_user),
+):
+    try:
+        return project_upload_service.project_files(upload_id, user_id)
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.post("/project-uploads/{upload_id}/analyze")
+async def analyze_project_upload(
+    upload_id: str,
+    request: Request,
+    user_id: str = Depends(require_project_upload_user),
+):
+    payload = await _read_limited_json(request, 64 * 1024)
+    try:
+        body = ProjectAnalyzeRequest.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_input=False)) from exc
+    try:
+        return await asyncio.to_thread(
+            project_upload_service.analyze_project_files,
+            upload_id,
+            user_id,
+            body.file_indices,
+            body.reset,
+            body.selected_file_indices,
+        )
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.get("/project-uploads/{upload_id}/quality-score")
+async def project_quality_score(
+    upload_id: str,
+    user_id: str = Depends(require_project_upload_user),
+):
+    try:
+        return await asyncio.to_thread(
+            project_upload_service.project_quality_score,
+            upload_id,
+            user_id,
+        )
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.post("/project-uploads/{upload_id}/fix-suggestions")
+async def create_project_fix_suggestion(
+    upload_id: str,
+    body: ProjectFixSuggestionRequest,
+    user_id: str = Depends(require_project_upload_user),
+):
+    try:
+        return await asyncio.to_thread(
+            project_upload_service.create_fix_suggestion,
+            upload_id,
+            user_id,
+            body.file_index,
+            body.issue_index,
+        )
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.post("/project-uploads/{upload_id}/fix-suggestions/{proposal_id}/apply")
+async def apply_project_fix_suggestion(
+    upload_id: str,
+    proposal_id: str,
+    body: ProjectFixApplyRequest | None = None,
+    user_id: str = Depends(require_project_upload_user),
+):
+    try:
+        return await asyncio.to_thread(
+            project_upload_service.apply_fix_suggestion,
+            upload_id,
+            user_id,
+            proposal_id,
+            body.allow_validation_override if body else False,
+        )
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
+@router.post("/project-uploads/{upload_id}/restore/{backup_id}")
+async def restore_project_backup(
+    upload_id: str,
+    backup_id: str,
+    user_id: str = Depends(require_project_upload_user),
+):
+    try:
+        return await asyncio.to_thread(
+            project_upload_service.restore_project_backup,
+            upload_id,
+            user_id,
+            backup_id,
+        )
+    except ProjectUploadError as exc:
+        raise _upload_error(exc) from exc
+
+
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class CodeFixRequest(BaseModel):
-    code:     str      = Field(..., min_length=1)
+    code:     str      = Field(..., min_length=1, max_length=14_000)
     language: str      = Field(..., min_length=1, max_length=60)
     filename: Optional[str] = Field(default="code.py")
 
@@ -68,14 +340,30 @@ class CodeFixResponse(BaseModel):
 # ── POST /api/fix/code — JSON body ────────────────────────────────────────────
 
 @router.post("/code", response_model=CodeFixResponse)
-def fix_code_route(body: CodeFixRequest):
+def fix_code_route(
+    body: CodeFixRequest,
+    authenticated_user: str = Depends(require_authenticated_user),
+):
     """
     Accept raw source code as JSON, run analysis, auto-fix, return fixed code.
     For Python: full static analysis (AST + Pylint + Bandit) + AI fix.
     For other languages: AI-only analysis and fix (static tools not available).
     """
     # Step 1: static analysis (Python only — returns empty for other languages)
-    analysis = analyze_code(language=body.language, code=body.code)
+    team_standards = []
+    if firebase_available():
+        try:
+            team_standards = [
+                standard for standard in get_team_standards_for_user(authenticated_user)
+                if standard.get("enabled", True)
+            ]
+        except Exception:
+            logger.exception("Could not load team standards for AutoFix analysis.")
+    analysis = analyze_code(
+        language=body.language,
+        code=body.code,
+        team_standards=team_standards,
+    )
     issues   = analysis.get("issues", [])
 
     # Step 2: auto-fix (AI handles all languages regardless of static support)
@@ -104,39 +392,49 @@ def fix_code_route(body: CodeFixRequest):
 
 @router.post("/upload")
 async def fix_upload_route(
-    file: UploadFile = File(..., description="Single source file (.py, .js, etc.) or ZIP archive (max 100 MB)"),
+    file: UploadFile = File(..., description="Single source file (max 50 MiB) or ZIP archive (max 500 MiB)"),
     download: str    = Form(default="true",
                             description="'true' = return fixed ZIP; 'false' = return JSON results"),
+    authenticated_user: str = Depends(require_authenticated_user),
 ):
     """
     Upload a single source file or a ZIP project archive.
-    Maximum upload size: 100 MB.
+    Maximum upload size: 50 MiB per source file or 500 MiB per ZIP archive.
     """
-    raw = await file.read()
     filename = file.filename or "upload"
-
-    # Guard: check raw upload size (100 MB hard cap)
-    MAX_RAW_BYTES = 100 * 1024 * 1024
-    if len(raw) > MAX_RAW_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Upload too large ({len(raw) // (1024*1024)} MB). Maximum allowed is 100 MB.",
-        )
-
-    # ── 1. Parse upload ───────────────────────────────────────────────────
     try:
         if filename.lower().endswith(".zip"):
-            source_files = read_zip_archive(raw)
+            source_files = read_zip_archive(file.file)
         else:
+            raw = await file.read(MAX_FILE_BYTES + 1)
+            if len(raw) > MAX_FILE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Single file exceeds the {MAX_FILE_BYTES // (1024 * 1024)} MiB upload limit.",
+                )
             sf = read_single_file(filename, raw)
             source_files = [sf]
+    # ── 1. Parse upload ───────────────────────────────────────────────────
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
     # ── 2. Static analysis per file ───────────────────────────────────────
     files_for_fix = []
+    team_standards = []
+    if firebase_available():
+        try:
+            team_standards = [
+                standard for standard in get_team_standards_for_user(authenticated_user)
+                if standard.get("enabled", True)
+            ]
+        except Exception:
+            logger.exception("Could not load team standards for uploaded AutoFix analysis.")
     for sf in source_files:
-        analysis = analyze_code(language=sf.language, code=sf.content)
+        analysis = analyze_code(
+            language=sf.language,
+            code=sf.content,
+            team_standards=team_standards,
+        )
         files_for_fix.append({
             "path":     sf.path,
             "language": sf.language,

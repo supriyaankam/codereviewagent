@@ -14,10 +14,15 @@ source of truth; memory is best-effort.
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.auth import require_authenticated_user
 from app.schemas import FeedbackCreate, FeedbackResponse
-from app.services.firebase_service import create_feedback, get_feedback
+from app.services.firebase_service import (
+    create_feedback,
+    get_feedback,
+    get_code_review_by_id,
+)
 from app.services.memory_service import store_feedback_memory, store_review_experience
 
 logger = logging.getLogger(__name__)
@@ -26,13 +31,21 @@ router = APIRouter(prefix="/api/feedback", tags=["feedback"])
 
 
 @router.post("", response_model=FeedbackResponse, status_code=201)
-def create_feedback_route(body: FeedbackCreate):
+def create_feedback_route(
+    body: FeedbackCreate,
+    authenticated_user: str = Depends(require_authenticated_user),
+):
     """
     Record a developer's Accept / Reject / Modify decision on an AI issue.
 
     Stores the decision in Firestore and propagates it to the Hindsight
     memory layer so future reviews benefit from the team's preferences.
     """
+    if body.user_id != authenticated_user:
+        raise HTTPException(status_code=403, detail="You may only submit feedback for your own account.")
+    review = get_code_review_by_id(body.review_id)
+    if review is None or review.get("author_id", review.get("authorId")) != authenticated_user:
+        raise HTTPException(status_code=404, detail="Review not found.")
     # ── 1. Persist to Firestore ───────────────────────────────────────────
     try:
         doc = create_feedback(
@@ -129,8 +142,13 @@ def create_feedback_route(body: FeedbackCreate):
 
 
 @router.get("", response_model=list[FeedbackResponse])
-def get_feedback_route(user_id: str = Query(..., description="Firebase UID")):
+def get_feedback_route(
+    user_id: str = Query(..., description="Firebase UID"),
+    authenticated_user: str = Depends(require_authenticated_user),
+):
     """Return all feedback submitted by a user, newest first."""
+    if user_id != authenticated_user:
+        raise HTTPException(status_code=403, detail="You may only access your own feedback.")
     try:
         raw = get_feedback(user_id)
         return [

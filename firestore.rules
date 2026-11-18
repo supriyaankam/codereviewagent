@@ -1,0 +1,123 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(ownerId) {
+      return signedIn() && request.auth.uid == ownerId;
+    }
+
+    function ownsReview(reviewId) {
+      let review = get(/databases/$(database)/documents/code_reviews/$(reviewId));
+      return signedIn()
+        && review.exists()
+        && (
+          review.data.get('authorId', '') == request.auth.uid
+          || review.data.get('author_id', '') == request.auth.uid
+        );
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId)
+        && request.resource.data.uid == userId
+        && request.resource.data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'createdAt', 'updatedAt'
+        ]);
+      allow update: if isOwner(userId)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'createdAt', 'updatedAt'
+        ])
+        && !request.resource.data.keys().hasAny(['role', 'isAdmin']);
+      allow delete: if false;
+    }
+
+    match /projects/{projectId} {
+      allow read: if isOwner(resource.data.get('ownerId', ''))
+        || isOwner(resource.data.get('owner_id', ''));
+      allow create: if signedIn()
+        && (
+          request.resource.data.get('ownerId', '') == request.auth.uid
+          || request.resource.data.get('owner_id', '') == request.auth.uid
+        )
+        && request.resource.data.keys().hasOnly([
+          'ownerId', 'owner_id', 'name', 'description', 'createdAt', 'updatedAt',
+          'created_at', 'updated_at', 'status', 'file_count', 'total_bytes',
+          'storage_backend', 'archive_storage_path', 'latest_analysis_id',
+          'latest_quality_score', 'latest_score_id'
+        ]);
+      allow update: if (
+        isOwner(resource.data.get('ownerId', '')) || isOwner(resource.data.get('owner_id', ''))
+      ) && (
+        request.resource.data.get('ownerId', '') == resource.data.get('ownerId', '')
+        && request.resource.data.get('owner_id', '') == resource.data.get('owner_id', '')
+      ) && request.resource.data.keys().hasOnly([
+        'ownerId', 'owner_id', 'name', 'description', 'createdAt', 'updatedAt',
+        'created_at', 'updated_at', 'status', 'file_count', 'total_bytes',
+        'storage_backend', 'archive_storage_path', 'latest_analysis_id',
+        'latest_quality_score', 'latest_score_id'
+      ]);
+      allow delete: if false;
+
+      match /{subcollection}/{document=**} {
+        allow read: if isOwner(
+          get(/databases/$(database)/documents/projects/$(projectId)).data.get('owner_id', '')
+        ) || isOwner(
+          get(/databases/$(database)/documents/projects/$(projectId)).data.get('ownerId', '')
+        );
+        allow write: if false;
+      }
+    }
+
+    match /code_reviews/{reviewId} {
+      allow read: if isOwner(resource.data.get('authorId', ''))
+        || isOwner(resource.data.get('author_id', ''));
+      allow create: if signedIn()
+        && (
+          request.resource.data.get('authorId', '') == request.auth.uid
+          || request.resource.data.get('author_id', '') == request.auth.uid
+        );
+      allow update: if (
+        isOwner(resource.data.get('authorId', '')) || isOwner(resource.data.get('author_id', ''))
+      ) && (
+        request.resource.data.get('authorId', '') == resource.data.get('authorId', '')
+        && request.resource.data.get('author_id', '') == resource.data.get('author_id', '')
+      );
+      allow delete: if false;
+    }
+
+    match /review_issues/{issueId} {
+      allow read: if ownsReview(resource.data.get('reviewId', ''))
+        || ownsReview(resource.data.get('review_id', ''));
+      allow create: if ownsReview(request.resource.data.get('reviewId', ''))
+        || ownsReview(request.resource.data.get('review_id', ''));
+      allow update, delete: if false;
+    }
+
+    match /feedback/{feedbackId} {
+      allow read: if isOwner(resource.data.get('userId', ''))
+        || isOwner(resource.data.get('user_id', ''));
+      allow create: if signedIn()
+        && (
+          request.resource.data.get('userId', '') == request.auth.uid
+          || request.resource.data.get('user_id', '') == request.auth.uid
+        )
+        && (
+          ownsReview(request.resource.data.get('reviewId', ''))
+          || ownsReview(request.resource.data.get('review_id', ''))
+        );
+      allow update, delete: if false;
+    }
+
+    match /team_standards/{standardId} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

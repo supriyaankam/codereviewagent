@@ -16,9 +16,23 @@ import { createUserDocument } from './firestoreService';
  */
 export async function registerUser(name, email, password) {
   const credential = await createUserWithEmailAndPassword(auth, email, password);
-  await updateProfile(credential.user, { displayName: name });
-  await createUserDocument(credential.user, { displayName: name });
-  return credential;
+  const profileWarnings = [];
+
+  try {
+    await updateProfile(credential.user, { displayName: name });
+  } catch (error) {
+    console.warn('[auth] Account created, but display name could not be saved.', error.code);
+    profileWarnings.push('Your display name could not be saved.');
+  }
+
+  try {
+    await createUserDocument(credential.user, { displayName: name });
+  } catch (error) {
+    console.warn('[auth] Account created, but the Firestore profile could not be saved.', error.code);
+    profileWarnings.push('Your user profile could not be saved to Firestore.');
+  }
+
+  return { credential, profileWarnings };
 }
 
 /**

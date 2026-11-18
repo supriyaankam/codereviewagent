@@ -2,8 +2,10 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.2
 python-dotenv==1.1.0
 firebase-admin==6.7.0
+google-cloud-storage==3.15.0
 pylint==3.3.7
 bandit==1.8.3
 openai==1.82.1
 python-multipart==0.0.20
 groq==0.30.0
+tree-sitter-language-pack==0.13.0

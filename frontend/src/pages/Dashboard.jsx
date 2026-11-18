@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
+import PropTypes from 'prop-types';
 import { useAuth } from '../context/AuthContext';
+import { fetchDashboard as requestDashboard } from '../services/dashboardService';
 
 const RISK_COLOR = {
   critical: 'danger',
@@ -36,8 +38,18 @@ function StatCard({ label, value, icon, color, description, loading }) {
   );
 }
 
+StatCard.propTypes = {
+  label: PropTypes.string.isRequired,
+  value: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
+  icon: PropTypes.string.isRequired,
+  color: PropTypes.string.isRequired,
+  description: PropTypes.string.isRequired,
+  loading: PropTypes.bool.isRequired,
+};
+
 export default function Dashboard() {
-  const { currentUser, firebaseReady } = useAuth();
+  const { currentUser } = useAuth();
+  const location = useLocation();
 
   const [stats, setStats]     = useState(null);
   const [loading, setLoading] = useState(true);
@@ -48,14 +60,9 @@ export default function Dashboard() {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(
-        `/api/dashboard?user_id=${encodeURIComponent(currentUser.uid)}`
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setStats(data);
+      setStats(await requestDashboard(currentUser));
     } catch (err) {
-      setError('Could not load dashboard. Is the backend running?');
+      setError(err.message || 'Could not load dashboard. Is the backend running?');
     } finally {
       setLoading(false);
     }
@@ -72,18 +79,45 @@ export default function Dashboard() {
       description: 'All-time reviews submitted',
     },
     {
+      label: 'Average Quality Score',
+      value: stats?.average_quality_score == null
+        ? '—'
+        : `${Number(stats.average_quality_score).toFixed(1)}%`,
+      icon: 'bi-graph-up',
+      color: 'success',
+      description: `${stats?.quality_scored_reviews ?? 0} scored reviews`,
+    },
+    {
       label:       'Issues Found',
-      value:       stats?.total_issues    ?? 0,
+      value:       stats?.total_issues == null ? '—' : stats.total_issues,
       icon:        'bi-exclamation-triangle',
       color:       'warning',
-      description: 'Total issues detected',
+      description: stats?.issue_counts_complete === false
+        ? 'Unavailable for some older reviews'
+        : 'Total issues detected',
     },
     {
       label:       'Critical Issues',
-      value:       stats?.critical_issues ?? 0,
+      value:       stats?.critical_issues == null ? '—' : stats.critical_issues,
       icon:        'bi-x-octagon',
       color:       'danger',
-      description: 'High-severity findings',
+      description: stats?.critical_counts_complete === false
+        ? 'Unavailable for some older reviews'
+        : 'High-severity findings',
+    },
+    {
+      label: 'Team Standards',
+      value: stats?.total_standards ?? 0,
+      icon: 'bi-shield-check',
+      color: 'primary',
+      description: `${stats?.enabled_standards ?? 0} enabled · ${stats?.disabled_standards ?? 0} disabled`,
+    },
+    {
+      label: 'Team Violations',
+      value: stats?.team_standard_violations ?? 0,
+      icon: 'bi-patch-exclamation',
+      color: 'danger',
+      description: 'Findings tied to enabled team standards',
     },
     {
       label:       'Accepted Suggestions',
@@ -120,12 +154,11 @@ export default function Dashboard() {
         </button>
       </div>
 
-      {/* Firebase not configured banner */}
-      {!firebaseReady && (
-        <div className="alert alert-warning small mb-4">
+      {location.state?.accountWarning && (
+        <div className="alert alert-warning small mb-4" role="status">
           <i className="bi bi-exclamation-triangle me-2"></i>
-          Firebase is not configured. Add your credentials to <code>frontend/.env</code> to
-          enable real-time statistics.
+          Your account was created, but some profile details could not be saved.{' '}
+          {location.state.accountWarning}
         </div>
       )}
 
@@ -196,6 +229,7 @@ export default function Dashboard() {
                     <th>Language</th>
                     <th>Risk</th>
                     <th>Issues</th>
+                    <th>Team Compliance</th>
                     <th>Date</th>
                     <th></th>
                   </tr>
@@ -226,8 +260,17 @@ export default function Dashboard() {
                           ) : <span className="text-muted">—</span>}
                         </td>
                         <td>
-                          <span className={`fw-medium ${rev.issues_count > 0 ? 'text-danger' : 'text-success'}`}>
-                            {rev.issues_count}
+                          {rev.issues_count == null ? (
+                            <span className="text-muted">—</span>
+                          ) : (
+                            <span className={`fw-medium ${rev.issues_count > 0 ? 'text-danger' : 'text-success'}`}>
+                              {rev.issues_count}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <span className={`badge ${rev.compliance_status === 'Compliant' ? 'bg-success-subtle text-success' : 'bg-danger-subtle text-danger'}`}>
+                            {rev.compliance_status || 'Compliant'}
                           </span>
                         </td>
                         <td className="text-secondary">{date}</td>

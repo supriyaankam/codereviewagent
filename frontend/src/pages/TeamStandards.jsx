@@ -25,10 +25,18 @@ const CATEGORY_COLORS = {
   general:        'secondary',
 };
 
-const EMPTY_FORM = { title: '', description: '', category: 'general', project_id: 'global' };
+const EMPTY_FORM = {
+  title: '',
+  description: '',
+  category: 'general',
+  severity: 'warning',
+  recommended_solution: '',
+  enabled: true,
+  project_id: 'global',
+};
 
 export default function TeamStandards() {
-  const { currentUser, firebaseReady } = useAuth();
+  const { currentUser } = useAuth();
 
   const [standards, setStandards]   = useState([]);
   const [loading, setLoading]       = useState(true);
@@ -46,14 +54,14 @@ export default function TeamStandards() {
     setLoading(true);
     setError('');
     try {
-      const data = await fetchStandards();
+      const data = await fetchStandards('', currentUser);
       setStandards(data || []);
     } catch (err) {
-      setError('Could not load standards. Is the backend running?');
+      setError(err.message || 'Could not load standards. Is the backend running?');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [currentUser]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -68,7 +76,10 @@ export default function TeamStandards() {
   function openEdit(s) {
     setEditTarget(s);
     setForm({ title: s.title, description: s.description,
-              category: s.category, project_id: s.project_id || 'global' });
+              category: s.category, severity: s.severity || 'warning',
+              recommended_solution: s.recommended_solution || '',
+              enabled: s.enabled !== false,
+              project_id: s.project_id || 'global' });
     setFormError('');
     setShowModal(true);
   }
@@ -96,16 +107,22 @@ export default function TeamStandards() {
           title:       form.title.trim(),
           description: form.description.trim(),
           category:    form.category,
-        });
+          severity:    form.severity,
+          recommended_solution: form.recommended_solution.trim(),
+          enabled:     form.enabled,
+        }, currentUser);
       } else {
-        const uid = currentUser?.uid ?? 'anonymous';
+        if (!currentUser) throw new Error('Sign in before creating a standard.');
         await createStandard({
           title:       form.title.trim(),
           description: form.description.trim(),
           category:    form.category,
+          severity:    form.severity,
+          recommended_solution: form.recommended_solution.trim(),
+          enabled:     form.enabled,
           project_id:  form.project_id || 'global',
-          created_by:  uid,
-        });
+          created_by:  currentUser.uid,
+        }, currentUser);
       }
       closeModal();
       await load();
@@ -123,7 +140,7 @@ export default function TeamStandards() {
     if (!deleteId) return;
     setDeleting(true);
     try {
-      await deleteStandard(deleteId);
+      await deleteStandard(deleteId, currentUser);
       setDeleteId(null);
       await load();
     } catch (err) {
@@ -131,6 +148,22 @@ export default function TeamStandards() {
       setDeleteId(null);
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function handleToggle(standard) {
+    try {
+      await updateStandard(standard.id, {
+        title: standard.title,
+        description: standard.description,
+        category: standard.category,
+        severity: standard.severity || 'warning',
+        recommended_solution: standard.recommended_solution || '',
+        enabled: standard.enabled === false,
+      }, currentUser);
+      await load();
+    } catch (err) {
+      setError(err.message || 'Could not update standard.');
     }
   }
 
@@ -180,7 +213,7 @@ export default function TeamStandards() {
             </span>
             <h5 className="fw-semibold text-dark mb-2">No standards yet</h5>
             <p className="text-secondary small mb-4" style={{ maxWidth: 400, margin: '0 auto' }}>
-              Add your team's coding conventions. The AI reviewer will check every
+              Add your team&apos;s coding conventions. The AI reviewer will check every
               submission against them and label violations clearly.
             </p>
             <button className="btn btn-primary btn-sm px-4" onClick={openCreate}>
@@ -190,8 +223,30 @@ export default function TeamStandards() {
         </div>
       )}
 
+      {!loading && (
+        <div className="row g-3 mb-4">
+          {[
+            ['Total standards', standards.length, 'primary', 'bi-shield-check'],
+            ['Enabled', standards.filter((s) => s.enabled !== false).length, 'success', 'bi-check-circle'],
+            ['Disabled', standards.filter((s) => s.enabled === false).length, 'secondary', 'bi-pause-circle'],
+          ].map(([label, value, color, icon]) => (
+            <div className="col-12 col-md-4" key={label}>
+              <div className="card border-0 shadow-sm">
+                <div className="card-body d-flex align-items-center justify-content-between">
+                  <span className="small text-secondary">{label}</span>
+                  <span className={`text-${color}`}>
+                    <i className={`bi ${icon} me-2`}></i><strong>{value}</strong>
+                  </span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Standards grid */}
       {!loading && standards.length > 0 && (
+        <>
         <div className="row g-3">
           {standards.map((s) => (
             <div key={s.id} className="col-12 col-md-6 col-xl-4">
@@ -203,24 +258,40 @@ export default function TeamStandards() {
                                       text-capitalize px-2 py-1 small`}>
                       {s.category}
                     </span>
-                    <div className="d-flex gap-1 flex-shrink-0">
-                      <button
-                        className="btn btn-sm btn-outline-secondary p-1 lh-1"
-                        title="Edit"
-                        onClick={() => openEdit(s)}
-                        aria-label={`Edit ${s.title}`}
-                      >
-                        <i className="bi bi-pencil" style={{ fontSize: '0.75rem' }}></i>
-                      </button>
-                      <button
-                        className="btn btn-sm btn-outline-danger p-1 lh-1"
-                        title="Delete"
-                        onClick={() => setDeleteId(s.id)}
-                        aria-label={`Delete ${s.title}`}
-                      >
-                        <i className="bi bi-trash" style={{ fontSize: '0.75rem' }}></i>
-                      </button>
+                    <div className="d-flex align-items-center gap-2">
+                      <span className={`badge bg-${s.severity === 'critical' ? 'danger' : s.severity === 'error' ? 'danger' : s.severity === 'warning' ? 'warning' : 'secondary'}-subtle text-${s.severity === 'critical' || s.severity === 'error' ? 'danger' : s.severity === 'warning' ? 'warning' : 'secondary'} text-capitalize`}>
+                        {s.severity || 'warning'}
+                      </span>
+                      <div className="form-check form-switch mb-0" title={s.enabled === false ? 'Enable standard' : 'Disable standard'}>
+                        <input
+                          className="form-check-input"
+                          type="checkbox"
+                          checked={s.enabled !== false}
+                          onChange={() => handleToggle(s)}
+                          aria-label={`${s.enabled === false ? 'Enable' : 'Disable'} ${s.title}`}
+                        />
+                      </div>
                     </div>
+                    {s.created_by === currentUser?.uid && (
+                      <div className="d-flex gap-1 flex-shrink-0">
+                        <button
+                          className="btn btn-sm btn-outline-secondary p-1 lh-1"
+                          title="Edit"
+                          onClick={() => openEdit(s)}
+                          aria-label={`Edit ${s.title}`}
+                        >
+                          <i className="bi bi-pencil" style={{ fontSize: '0.75rem' }}></i>
+                        </button>
+                        <button
+                          className="btn btn-sm btn-outline-danger p-1 lh-1"
+                          title="Delete"
+                          onClick={() => setDeleteId(s.id)}
+                          aria-label={`Delete ${s.title}`}
+                        >
+                          <i className="bi bi-trash" style={{ fontSize: '0.75rem' }}></i>
+                        </button>
+                      </div>
+                    )}
                   </div>
                   <h6 className="fw-semibold text-dark mb-2" style={{ fontSize: '0.9rem' }}>
                     {s.title}
@@ -228,6 +299,11 @@ export default function TeamStandards() {
                   <p className="text-secondary small mb-0 standard-desc">
                     {s.description}
                   </p>
+                  {s.recommended_solution && (
+                    <p className="small mt-3 mb-0">
+                      <strong>Recommended:</strong> {s.recommended_solution}
+                    </p>
+                  )}
                 </div>
                 {s.project_id && s.project_id !== 'global' && (
                   <div className="card-footer bg-transparent border-top-0 pt-0 px-4 pb-3">
@@ -240,6 +316,7 @@ export default function TeamStandards() {
             </div>
           ))}
         </div>
+        </>
       )}
 
       {/* ── Create / Edit Modal ── */}
@@ -296,10 +373,42 @@ export default function TeamStandards() {
                     </select>
                   </div>
 
+                  <div className="mb-3">
+                    <label htmlFor="st-severity" className="form-label fw-medium small">
+                      Severity
+                    </label>
+                    <select id="st-severity" name="severity" className="form-select"
+                            value={form.severity} onChange={handleFormChange}>
+                      <option value="critical">Critical</option>
+                      <option value="error">High / Error</option>
+                      <option value="warning">Medium / Warning</option>
+                      <option value="info">Low / Info</option>
+                    </select>
+                  </div>
+
+                  <div className="mb-3">
+                    <label htmlFor="st-solution" className="form-label fw-medium small">
+                      Recommended solution
+                    </label>
+                    <textarea id="st-solution" name="recommended_solution"
+                              className="form-control" rows={2}
+                              placeholder="Describe the preferred correction…"
+                              value={form.recommended_solution} onChange={handleFormChange} />
+                  </div>
+
+                  <div className="form-check form-switch mb-3">
+                    <input id="st-enabled" name="enabled" className="form-check-input"
+                           type="checkbox" checked={form.enabled}
+                           onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
+                    <label className="form-check-label small" htmlFor="st-enabled">
+                      Standard enabled
+                    </label>
+                  </div>
+
                   {!editTarget && (
                     <div className="mb-1">
                       <label htmlFor="st-project" className="form-label fw-medium small">
-                        Project ID <span className="text-muted">(leave "global" for all projects)</span>
+                        Project ID <span className="text-muted">(leave &quot;global&quot; for all projects)</span>
                       </label>
                       <input id="st-project" name="project_id" type="text"
                              className="form-control"

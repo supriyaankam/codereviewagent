@@ -14,3 +14,57 @@
   overflow: hidden;
   line-height: 1.5;
 }
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) > .d-flex h4 {
+  font-size: 1.75rem;
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) > .d-flex p {
+  font-size: 1rem;
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) .standard-card h6 {
+  font-size: 1.05rem !important;
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) .standard-card .standard-desc {
+  font-size: 1rem;
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) .standard-card .small {
+  font-size: 0.95rem;
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) .standard-card .badge {
+  font-size: 0.85rem;
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) > .row.g-3.mb-4 .small {
+  font-size: 0.95rem;
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) > .row.g-3.mb-4 strong {
+  font-size: 1.1rem;
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) .btn-sm {
+  font-size: 0.95rem;
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) .standard-card .btn-sm i {
+  font-size: 0.875rem !important;
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) .form-check-input {
+  transform: scale(1.1);
+}
+
+.p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) .modal .small {
+  font-size: 0.9rem;
+}
+
+@media (max-width: 575.98px) {
+  .p-4.p-md-5:has(> .row.g-3.mb-4 > .col-12.col-md-4) > .d-flex h4 {
+    font-size: 1.5rem;
+  }
+}

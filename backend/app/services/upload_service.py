@@ -8,22 +8,24 @@ Supports:
 SAFETY:
   - Uploaded code is NEVER executed, imported, or eval'd.
   - File paths inside ZIPs are sanitised to prevent directory traversal.
-  - Maximum total extracted size is capped at 5 MB.
+  - ZIP entries are validated and extracted source size is capped.
   - Only recognised source-code extensions are extracted.
 """
 
 from __future__ import annotations
 
 import io
+import re
 import zipfile
+from typing import BinaryIO
 from pathlib import PurePosixPath
 
 # ── Limits ────────────────────────────────────────────────────────────────────
 
-MAX_TOTAL_BYTES  = 100 * 1024 * 1024  # 100 MB total extracted from ZIP
-MAX_FILE_BYTES   = 10  * 1024 * 1024  # 10 MB per single file upload
-MAX_ZIP_BYTES    = 100 * 1024 * 1024  # 100 MB raw ZIP upload size
-MAX_FILE_IN_ZIP  = 5   * 1024 * 1024  # 5 MB per individual file inside ZIP (skip larger ones)
+MAX_TOTAL_BYTES  = 500 * 1024 * 1024  # 500 MiB total extracted from ZIP
+MAX_FILE_BYTES   = 50  * 1024 * 1024  # 50 MiB per single file upload
+MAX_ZIP_BYTES    = 500 * 1024 * 1024  # 500 MiB raw ZIP upload size
+MAX_FILE_IN_ZIP  = 20  * 1024 * 1024  # 20 MiB per source file inside ZIP
 MAX_FILES        = 1000               # max number of source files per ZIP
 
 # ── Supported extensions → language tag ──────────────────────────────────────
@@ -90,88 +92,129 @@ def read_single_file(filename: str, data: bytes) -> SourceFile:
     return SourceFile(path=filename, language=language, content=content)
 
 
-def read_zip_archive(data: bytes) -> list[SourceFile]:
+def zip_source_entries(
+    zf: zipfile.ZipFile,
+) -> list[tuple[zipfile.ZipInfo, str, str]]:
+    """Validate a ZIP central directory and return supported source entries without reading them."""
+    entries: list[tuple[zipfile.ZipInfo, str, str]] = []
+    total_bytes = 0
+    skipped_large = 0
+
+    for info in zf.infolist():
+        path = PurePosixPath(info.filename)
+        if (
+            not path.parts
+            or path.is_absolute()
+            or "\\" in info.filename
+            or re.match(r"^[A-Za-z]:", info.filename)
+            or any(part in ("", ".", "..") for part in path.parts)
+            or any(
+                part.endswith((" ", "."))
+                or any(char in '<>:"|?*' for char in part)
+                or part.upper().split(".")[0] in {
+                    "CON", "PRN", "AUX", "NUL",
+                    *(f"COM{index}" for index in range(1, 10)),
+                    *(f"LPT{index}" for index in range(1, 10)),
+                }
+                for part in path.parts
+            )
+        ):
+            raise ValueError(f"ZIP archive contains an unsafe path: {info.filename!r}.")
+
+        if info.filename.endswith("/"):
+            continue
+        if _should_skip(path):
+            continue
+
+        language = EXTENSION_MAP.get(path.suffix.lower())
+        if language is None:
+            continue
+        if info.file_size > MAX_FILE_IN_ZIP:
+            skipped_large += 1
+            continue
+
+        total_bytes += info.file_size
+        if total_bytes > MAX_TOTAL_BYTES:
+            raise ValueError(
+                f"ZIP archive total extracted size exceeds "
+                f"{MAX_TOTAL_BYTES // (1024*1024)} MB limit."
+            )
+        if len(entries) >= MAX_FILES:
+            break
+        entries.append((info, info.filename, language))
+
+    if not entries:
+        raise ValueError(
+            "No supported source files found in the ZIP. "
+            f"Supported extensions: {', '.join(EXTENSION_MAP)}"
+            + (
+                f" ({skipped_large} file(s) skipped — exceeded "
+                f"{MAX_FILE_IN_ZIP // (1024*1024)} MB per-file limit)."
+                if skipped_large else "."
+            )
+        )
+    return entries
+
+
+def read_zip_archive(data: bytes | BinaryIO) -> list[SourceFile]:
     """
     Extract all recognised source files from a ZIP archive.
     Returns a list of SourceFile objects.
     Raises ValueError for invalid ZIPs or size violations.
     """
-    if not zipfile.is_zipfile(io.BytesIO(data)):
+    archive_file: BinaryIO
+    if isinstance(data, bytes):
+        archive_file = io.BytesIO(data)
+        archive_size = len(data)
+    else:
+        archive_file = data
+        try:
+            archive_file.seek(0, 2)
+            archive_size = archive_file.tell()
+            archive_file.seek(0)
+        except (OSError, AttributeError) as exc:
+            raise ValueError("ZIP upload must support seeking.") from exc
+
+    if not zipfile.is_zipfile(archive_file):
         raise ValueError("Uploaded file is not a valid ZIP archive.")
 
-    # Validate raw ZIP size before extracting
-    if len(data) > MAX_ZIP_BYTES:
+    if archive_size > MAX_ZIP_BYTES:
         raise ValueError(
-            f"ZIP file is {len(data) // (1024*1024)} MB — "
+            f"ZIP file is {archive_size // (1024*1024)} MB — "
             f"maximum allowed is {MAX_ZIP_BYTES // (1024*1024)} MB."
         )
 
     files: list[SourceFile] = []
-    total_bytes = 0
-    skipped_large = 0
-
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        for info in zf.infolist():
-            # Skip directories
-            if info.filename.endswith("/"):
-                continue
-
-            path = PurePosixPath(info.filename)
-
-            # Skip hidden, skipped dirs, and unsupported extensions
-            if _should_skip(path):
-                continue
-
-            ext = path.suffix.lower()
-            language = EXTENSION_MAP.get(ext)
-            if language is None:
-                continue
-
-            # Skip individual files that are too large (e.g. generated/minified)
-            if info.file_size > MAX_FILE_IN_ZIP:
-                skipped_large += 1
-                continue
-
-            total_bytes += info.file_size
-            if total_bytes > MAX_TOTAL_BYTES:
-                raise ValueError(
-                    f"ZIP archive total extracted size exceeds "
-                    f"{MAX_TOTAL_BYTES // (1024*1024)} MB limit."
-                )
-
-            if len(files) >= MAX_FILES:
-                break
-
+    archive_file.seek(0)
+    with zipfile.ZipFile(archive_file) as zf:
+        for info, path, language in zip_source_entries(zf):
             raw = zf.read(info.filename)
             content = _decode(raw, info.filename)
             files.append(SourceFile(
-                path=info.filename,
+                path=path,
                 language=language,
                 content=content,
             ))
-
-    if not files:
-        raise ValueError(
-            "No supported source files found in the ZIP. "
-            f"Supported extensions: {', '.join(EXTENSION_MAP)}"
-            + (f" ({skipped_large} file(s) skipped — exceeded {MAX_FILE_IN_ZIP // (1024*1024)} MB per-file limit)." if skipped_large else ".")
-        )
-
     return files
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _should_skip(path: PurePosixPath) -> bool:
-    """Return True if any part of the path is in the skip list."""
-    parts = set(path.parts[:-1])   # exclude filename itself
-    if parts & _SKIP_DIRS:
+def should_skip_path(path: PurePosixPath, additional_dirs: set[str] | None = None) -> bool:
+    """Return True if any path part is hidden or in the configured skip list."""
+    parts = {part.casefold() for part in path.parts[:-1]}
+    skip_dirs = {part.casefold() for part in _SKIP_DIRS | (additional_dirs or set())}
+    if parts & skip_dirs:
         return True
     # Skip hidden files/dirs (starting with .)
     for part in path.parts:
         if part.startswith("."):
             return True
     return False
+
+
+def _should_skip(path: PurePosixPath) -> bool:
+    return should_skip_path(path)
 
 
 def _decode(data: bytes, filename: str) -> str:

@@ -1,12 +1,20 @@
 /* ── Shell ──────────────────────────────────── */
 .app-shell {
+  height: 100vh;
   min-height: 100vh;
 }
 
 /* ── Sidebar ────────────────────────────────── */
 .sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 1000;
   width: 240px;
   min-width: 240px;
+  height: 100vh;
+  overflow-y: auto;
   background-color: #0f172a;
   color: #cbd5e1;
 }
@@ -72,6 +80,10 @@
 
 /* ── Main area ──────────────────────────────── */
 .main-content {
+  margin-left: 240px;
+  height: 100vh;
+  min-width: 0;
+  overflow-y: auto;
   background-color: #f8fafc;
 }
 
