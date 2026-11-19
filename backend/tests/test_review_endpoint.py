@@ -9,6 +9,181 @@ from app.schemas import ReviewRequest
 
 
 class ReviewEndpointTests(unittest.TestCase):
+    def _assert_review_rejected_before_analysis(
+        self,
+        body,
+        expected_code,
+        status_code,
+        expected_detected_language=None,
+    ):
+        with (
+            patch.object(review_router, "firebase_available") as firebase,
+            patch.object(review_router, "analyze_code") as analyze,
+            patch.object(review_router, "run_ai_review") as ai_review,
+            patch.object(review_router, "calculate_quality_score") as score,
+            patch.object(review_router, "create_code_review") as persist,
+        ):
+            with self.assertRaises(HTTPException) as error:
+                review_router.full_review(body, authenticated_user="test-user")
+
+        self.assertEqual(error.exception.status_code, status_code)
+        self.assertEqual(error.exception.detail["code"], expected_code)
+        self.assertEqual(error.exception.detail["selected_language"], body.language)
+        if expected_detected_language is not None:
+            self.assertEqual(
+                error.exception.detail["detected_language"],
+                expected_detected_language,
+            )
+        firebase.assert_not_called()
+        analyze.assert_not_called()
+        ai_review.assert_not_called()
+        score.assert_not_called()
+        persist.assert_not_called()
+
+    def test_javascript_review_returns_detected_language(self):
+        body = ReviewRequest(
+            user_id="test-user",
+            project_name="demo",
+            language="JavaScript",
+            code='console.log("hello");',
+        )
+        static_result = {
+            "language": "javascript",
+            "issues": [],
+            "summary": {"counts": {"total": 0}},
+            "supported": True,
+            "has_syntax_error": False,
+        }
+        ai_result = {
+            "overall_risk": "info",
+            "summary": "No findings reported.",
+            "issues": [],
+            "ai_available": True,
+        }
+
+        with (
+            patch.object(review_router, "firebase_available", return_value=True),
+            patch.object(review_router, "get_team_standards_for_user", return_value=[]),
+            patch.object(review_router, "analyze_code", return_value=static_result),
+            patch.object(review_router, "retrieve_relevant_experiences", return_value=[]),
+            patch.object(review_router, "run_ai_review", return_value=ai_result),
+            patch.object(review_router, "memory_status", return_value={"available": False}),
+            patch.object(review_router, "create_code_review", return_value={"id": "javascript-review"}),
+        ):
+            response = review_router.full_review(body, authenticated_user="test-user")
+
+        self.assertEqual(response.detected_language, "javascript")
+        self.assertEqual(response.language_validation_status, "matched")
+
+    def test_javascript_selected_for_c_code_is_rejected_before_analysis(self):
+        self._assert_review_rejected_before_analysis(
+            ReviewRequest(
+                user_id="test-user",
+                project_name="demo",
+                language="JavaScript",
+                code="int main(void) { return _Generic(0, int: 1, default: 0); }",
+            ),
+            "language_mismatch",
+            422,
+            "c",
+        )
+
+    def test_python_selected_for_java_code_is_rejected_before_analysis(self):
+        self._assert_review_rejected_before_analysis(
+            ReviewRequest(
+                user_id="test-user",
+                project_name="demo",
+                language="Python",
+                code=(
+                    'public class Main { public static void main(String[] args) { '
+                    'System.out.println("hello"); } }'
+                ),
+            ),
+            "language_mismatch",
+            422,
+            "java",
+        )
+
+    def test_ambiguous_typescript_requires_confirmation_before_analysis(self):
+        self._assert_review_rejected_before_analysis(
+            ReviewRequest(
+                user_id="test-user",
+                project_name="demo",
+                language="JavaScript",
+                code="const count: number = 1;",
+            ),
+            "language_ambiguous",
+            409,
+        )
+
+    def test_confirmed_ambiguous_language_continues_review(self):
+        body = ReviewRequest(
+            user_id="test-user",
+            project_name="demo",
+            language="JavaScript",
+            code="const count: number = 1;",
+            language_confirmed=True,
+        )
+        static_result = {
+            "language": "javascript",
+            "issues": [],
+            "summary": {"counts": {"total": 0}},
+            "supported": True,
+            "has_syntax_error": False,
+        }
+        ai_result = {
+            "overall_risk": "info",
+            "summary": "No findings reported.",
+            "issues": [],
+            "ai_available": True,
+        }
+
+        with (
+            patch.object(review_router, "firebase_available", return_value=True),
+            patch.object(review_router, "get_team_standards_for_user", return_value=[]),
+            patch.object(review_router, "analyze_code", return_value=static_result) as analyze,
+            patch.object(review_router, "retrieve_relevant_experiences", return_value=[]),
+            patch.object(review_router, "run_ai_review", return_value=ai_result) as ai_review,
+            patch.object(review_router, "memory_status", return_value={"available": False}),
+            patch.object(
+                review_router,
+                "create_code_review",
+                return_value={"id": "confirmed-review"},
+            ) as persist,
+        ):
+            response = review_router.full_review(body, authenticated_user="test-user")
+
+        self.assertEqual(response.detected_language, "javascript")
+        self.assertEqual(response.language_validation_status, "confirmed_ambiguous")
+        self.assertTrue(response.saved_to_db)
+        analyze.assert_called_once()
+        ai_review.assert_called_once()
+        persist.assert_called_once()
+
+    def test_whitespace_only_code_is_rejected_before_analysis(self):
+        self._assert_review_rejected_before_analysis(
+            ReviewRequest(
+                user_id="test-user",
+                project_name="demo",
+                language="JavaScript",
+                code=" \n\t ",
+            ),
+            "empty_code",
+            422,
+        )
+
+    def test_unsupported_language_is_rejected_before_analysis(self):
+        self._assert_review_rejected_before_analysis(
+            ReviewRequest(
+                user_id="test-user",
+                project_name="demo",
+                language="Fortran",
+                code="program hello\nend program hello",
+            ),
+            "unsupported_language",
+            422,
+        )
+
     def test_review_includes_enabled_team_standard_finding(self):
         body = ReviewRequest(
             user_id="test-user",
@@ -196,7 +371,7 @@ class ReviewEndpointTests(unittest.TestCase):
         body = ReviewRequest(
             user_id="test-user",
             project_name="demo",
-            language="unsupported",
+            language="Python",
             code="value = 1\n",
         )
         ai_result = {
@@ -215,6 +390,7 @@ class ReviewEndpointTests(unittest.TestCase):
             patch.object(review_router, "retrieve_relevant_experiences", return_value=[]),
             patch.object(review_router, "run_ai_review", return_value=ai_result),
             patch.object(review_router, "memory_status", return_value={"available": False}),
+            patch.object(review_router, "calculate_quality_score") as calculate_score,
             patch.object(
                 review_router,
                 "create_code_review",
@@ -226,6 +402,7 @@ class ReviewEndpointTests(unittest.TestCase):
         review_data = persist.call_args.kwargs["review_data"]
         self.assertEqual(response.analysis_status, "failed")
         self.assertIsNone(response.quality_score)
+        calculate_score.assert_not_called()
         self.assertIsNone(response.overall_risk)
         self.assertIsNone(response.total_issue_count)
         self.assertIsNone(response.static_supported)
@@ -284,6 +461,7 @@ class ReviewEndpointTests(unittest.TestCase):
             project_name="demo",
             language="JavaScript",
             code="const value = 1;\n",
+            language_confirmed=True,
         )
         static_result = {
             "language": "javascript",
@@ -311,6 +489,7 @@ class ReviewEndpointTests(unittest.TestCase):
             patch.object(review_router, "retrieve_relevant_experiences", return_value=[]),
             patch.object(review_router, "run_ai_review", return_value=ai_result),
             patch.object(review_router, "memory_status", return_value={"available": False}),
+            patch.object(review_router, "calculate_quality_score") as calculate_score,
             patch.object(
                 review_router,
                 "create_code_review",
@@ -332,6 +511,8 @@ class ReviewEndpointTests(unittest.TestCase):
             expected_metadata,
         )
         self.assertFalse(response.static_supported)
+        self.assertIsNone(response.quality_score)
+        calculate_score.assert_not_called()
 
     def test_review_persistence_failure_returns_error_instead_of_success(self):
         body = ReviewRequest(

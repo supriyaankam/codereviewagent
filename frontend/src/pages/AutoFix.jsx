@@ -9,10 +9,10 @@ import '../styles/CodeReview.css';
 
 const LANGUAGES = [
   'Python', 'JavaScript', 'TypeScript', 'Java', 'C#',
-  'C++', 'Go', 'Rust', 'Ruby', 'PHP', 'Swift', 'Kotlin', 'Other',
+  'C', 'C++', 'Go', 'Rust', 'Ruby', 'PHP', 'Swift', 'Kotlin', 'Other',
 ];
 
-const ACCEPTED_EXTS = '.py,.js,.ts,.jsx,.tsx,.java,.cs,.go,.rb,.php,.cpp,.c,.rs,.kt,.swift,.zip';
+const ACCEPTED_EXTS = '.py,.pyi,.js,.mjs,.cjs,.ts,.mts,.cts,.jsx,.tsx,.java,.cs,.csx,.go,.rb,.rbw,.php,.cpp,.cc,.cxx,.c++,.hpp,.hh,.hxx,.c,.rs,.kt,.kts,.swift,.zip';
 const PROJECT_UPLOAD_RESUME_KEY = 'codeReviewAgent.projectUploadResume';
 
 function formatBytes(bytes) {
@@ -74,6 +74,7 @@ function ProjectQualityScore({ qualityScore }) {
             <p className="small text-secondary mb-0">
               Calculated from confirmed findings and measured Python complexity in the analyzed files.
               {` Coverage: ${qualityScore.coverage.analyzed}/${qualityScore.coverage.selected} selected files.`}
+              {' '}A score of 100 does not guarantee that the project is bug-free.
             </p>
           </div>
         </div>
@@ -112,6 +113,21 @@ function ProjectQualityScore({ qualityScore }) {
             <ul className="small text-secondary mb-0">
               {qualityScore.factors.map((factor) => <li key={factor}>{factor}</li>)}
             </ul>
+          )}
+          {qualityScore.files?.length > 0 && (
+            <div className="mt-3">
+              <p className="small fw-semibold mb-1">File-wise scores and analyzed languages</p>
+              <ul className="small text-secondary mb-0">
+                {qualityScore.files.map(file => (
+                  <li key={file.path}>
+                    <code>{file.path}</code> ({file.language}): {file.score}/100
+                    {file.duplicate_of && (
+                      <span> (duplicate source; project total counted once via <code>{file.duplicate_of}</code>)</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </details>
       </div>
@@ -280,6 +296,12 @@ ProjectQualityScore.propTypes = {
     metrics: PropTypes.object.isRequired,
     method: PropTypes.object.isRequired,
     coverage: PropTypes.object.isRequired,
+    files: PropTypes.arrayOf(PropTypes.shape({
+      path: PropTypes.string.isRequired,
+      language: PropTypes.string.isRequired,
+      score: PropTypes.number.isRequired,
+      duplicate_of: PropTypes.string,
+    })),
   }).isRequired,
 };
 function ChangeTable({ changes }) {
@@ -493,6 +515,7 @@ export default function AutoFix() {
   const [uploadProgress, setUploadProgress] = useState({ uploaded: 0, total: 0 });
   const [uploadStatus, setUploadStatus] = useState('');
   const [projectFiles, setProjectFiles] = useState([]);
+  const [excludedProjectFiles, setExcludedProjectFiles] = useState([]);
   const [selectedProjectFiles, setSelectedProjectFiles] = useState([]);
   const [analysisLimits, setAnalysisLimits] = useState({
     maximum_files: 200,
@@ -532,6 +555,7 @@ export default function AutoFix() {
     setUploadProgress({ uploaded: 0, total: 0 });
     setUploadStatus('');
     setProjectFiles([]);
+    setExcludedProjectFiles([]);
     setSelectedProjectFiles([]);
     setProjectWasAnalyzed(false);
     setQualityScore(null);
@@ -555,6 +579,7 @@ export default function AutoFix() {
       );
       setUploadId('');
       setProjectFiles([]);
+      setExcludedProjectFiles([]);
       setSelectedProjectFiles([]);
       setProjectWasAnalyzed(false);
     } else if (droppedFiles[0]) {
@@ -608,6 +633,7 @@ export default function AutoFix() {
     });
     setUploadStatus(restoredUploadId ? 'Ready to resume the previous upload.' : '');
     setProjectFiles([]);
+    setExcludedProjectFiles([]);
     setSelectedProjectFiles([]);
     setProjectWasAnalyzed(false);
     setQualityScore(null);
@@ -757,6 +783,7 @@ export default function AutoFix() {
       if (!filesResponse.ok) throw new Error(await responseError(filesResponse));
       const project = await filesResponse.json();
       setProjectFiles(project.files);
+      setExcludedProjectFiles(project.excluded_files || []);
       setAnalysisLimits(project.analysis_limits);
       setSelectedProjectFiles([]);
       setUploadProgress({ uploaded: totalBytes, total: totalBytes });
@@ -803,6 +830,7 @@ export default function AutoFix() {
       setUploadId(project.upload_id);
       setFolderName(project.name);
       setProjectFiles(project.files);
+      setExcludedProjectFiles(project.excluded_files || []);
       setAnalysisLimits(project.analysis_limits);
       setSelectedProjectFiles([]);
       setProjectWasAnalyzed(false);
@@ -879,6 +907,7 @@ export default function AutoFix() {
           not_selected: Math.max(0, projectFiles.length - selectedProjectFiles.length),
           skipped_files: [...accumulatedSkipped],
           errors: [...accumulatedErrors],
+          reused: data.summary.reused || 0,
           complete: data.summary.complete,
           languages: data.summary.languages,
           historyPersisted: data.summary.history_persisted,
@@ -1375,7 +1404,7 @@ export default function AutoFix() {
                       <h6 className="fw-semibold mb-1">{folderName} · Uploaded project files</h6>
                       <p className="small text-secondary mb-0">
                         {projectFiles.filter(item => item.selectable).length} supported source files ·
-                        {' '}{projectFiles.length} total files
+                        {' '}{projectFiles.length + excludedProjectFiles.length} total entries
                       </p>
                     </div>
                     <span className="small text-secondary">
@@ -1425,6 +1454,18 @@ export default function AutoFix() {
                     </label>
                   ))}
                 </div>
+                {excludedProjectFiles.length > 0 && (
+                  <div className="px-3 py-2 border-top bg-light">
+                    <p className="small fw-semibold mb-1">ZIP entries not analyzed</p>
+                    <ul className="small text-secondary mb-0">
+                      {excludedProjectFiles.map(item => (
+                        <li key={`${item.path}:${item.reason}`}>
+                          <code>{item.path}</code>: {item.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <div className="card-footer bg-white">
                   <p className="small text-secondary mb-2">Step 3 · Analyze Project</p>
                   <button
@@ -1492,7 +1533,8 @@ export default function AutoFix() {
                   <div className="alert alert-info small">
                     <p className="small text-secondary mb-1">Step 4 · View analysis results</p>
                     <strong>Project analysis summary:</strong> {analysisSummary.analyzed} analyzed,
-                    {' '}{analysisSummary.skipped} selected file(s) skipped,
+                    {' '}{analysisSummary.reused || 0} duplicate file(s) reused,
+                    {' '}{analysisSummary.skipped} file(s) skipped,
                     {' '}{analysisSummary.not_selected} not selected,
                     {' '}{analysisSummary.errors?.length || 0} error(s).
                     {analysisSummary.languages?.length > 0 && (

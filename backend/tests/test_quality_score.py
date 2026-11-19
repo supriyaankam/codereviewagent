@@ -1,6 +1,9 @@
 import unittest
 
-from app.services.quality_score import calculate_quality_score
+from app.services.quality_score import (
+    calculate_project_quality_score,
+    calculate_quality_score,
+)
 
 
 class QualityScoreTests(unittest.TestCase):
@@ -138,6 +141,64 @@ class QualityScoreTests(unittest.TestCase):
         result = calculate_quality_score(code, "python", [], [issue])
 
         self.assertEqual(result["score"], 96)
+
+    def test_project_score_counts_identical_same_language_source_once(self):
+        finding = {
+            "title": "Possible division by zero",
+            "line": 2,
+            "severity": "warning",
+            "category": "quality",
+            "source": "tree_sitter_semantic",
+        }
+        source = "function calculate(value) {\n  return value / 0;\n}\n"
+        result = calculate_project_quality_score([
+            {
+                "path": "src/main.js",
+                "language": "javascript",
+                "code": source,
+                "static_issues": [finding],
+            },
+            {
+                "path": "copy/main.js",
+                "language": "javascript",
+                "code": source,
+                "static_issues": [finding],
+            },
+        ])
+
+        self.assertEqual(result["score"], 95)
+        self.assertEqual(result["metrics"]["analyzed_files"], 2)
+        self.assertEqual(result["files"][0]["language"], "javascript")
+        self.assertEqual(result["files"][0]["score"], 95)
+        self.assertEqual(result["files"][1]["duplicate_of"], "src/main.js")
+        self.assertEqual(result["files"][1]["score"], 95)
+
+    def test_project_score_does_not_merge_identical_source_across_languages(self):
+        finding = {
+            "title": "Possible division by zero",
+            "line": 1,
+            "severity": "warning",
+            "category": "quality",
+            "source": "tree_sitter_semantic",
+        }
+        source = "value / 0\n"
+        result = calculate_project_quality_score([
+            {
+                "path": "src/main.js",
+                "language": "javascript",
+                "code": source,
+                "static_issues": [finding],
+            },
+            {
+                "path": "src/main.ts",
+                "language": "typescript",
+                "code": source,
+                "static_issues": [finding],
+            },
+        ])
+
+        self.assertEqual(result["score"], 90)
+        self.assertNotIn("duplicate_of", result["files"][1])
 
 
 if __name__ == "__main__":

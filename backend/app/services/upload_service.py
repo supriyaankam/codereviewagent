@@ -27,24 +27,39 @@ MAX_FILE_BYTES   = 50  * 1024 * 1024  # 50 MiB per single file upload
 MAX_ZIP_BYTES    = 500 * 1024 * 1024  # 500 MiB raw ZIP upload size
 MAX_FILE_IN_ZIP  = 20  * 1024 * 1024  # 20 MiB per source file inside ZIP
 MAX_FILES        = 1000               # max number of source files per ZIP
+_MAX_REPORTED_SKIPPED_FILES = 1000
 
 # ── Supported extensions → language tag ──────────────────────────────────────
 
 EXTENSION_MAP: dict[str, str] = {
     ".py":   "python",
+    ".pyi":  "python",
     ".js":   "javascript",
+    ".mjs":  "javascript",
+    ".cjs":  "javascript",
     ".ts":   "typescript",
+    ".mts":  "typescript",
+    ".cts":  "typescript",
     ".jsx":  "javascript",
     ".tsx":  "typescript",
     ".java": "java",
     ".cs":   "csharp",
+    ".csx":  "csharp",
     ".go":   "go",
     ".rb":   "ruby",
+    ".rbw":  "ruby",
     ".php":  "php",
     ".cpp":  "cpp",
+    ".cc":   "cpp",
+    ".cxx":  "cpp",
+    ".c++":  "cpp",
+    ".hpp":  "cpp",
+    ".hh":   "cpp",
+    ".hxx":  "cpp",
     ".c":    "c",
     ".rs":   "rust",
     ".kt":   "kotlin",
+    ".kts":  "kotlin",
     ".swift":"swift",
 }
 
@@ -94,11 +109,27 @@ def read_single_file(filename: str, data: bytes) -> SourceFile:
 
 def zip_source_entries(
     zf: zipfile.ZipFile,
+    skipped_files: list[dict[str, str]] | None = None,
+    additional_skip_dirs: set[str] | None = None,
 ) -> list[tuple[zipfile.ZipInfo, str, str]]:
     """Validate a ZIP central directory and return supported source entries without reading them."""
     entries: list[tuple[zipfile.ZipInfo, str, str]] = []
     total_bytes = 0
     skipped_large = 0
+
+    def report_skipped(path: str, reason: str) -> None:
+        if skipped_files is None:
+            return
+        if len(skipped_files) < _MAX_REPORTED_SKIPPED_FILES:
+            skipped_files.append({"path": path, "reason": reason})
+        elif len(skipped_files) == _MAX_REPORTED_SKIPPED_FILES:
+            skipped_files.append({
+                "path": "(additional ZIP entries)",
+                "reason": (
+                    f"Further skipped entries are not listed; the report is limited to "
+                    f"{_MAX_REPORTED_SKIPPED_FILES} paths."
+                ),
+            })
 
     for info in zf.infolist():
         path = PurePosixPath(info.filename)
@@ -123,28 +154,41 @@ def zip_source_entries(
 
         if info.filename.endswith("/"):
             continue
-        if _should_skip(path):
+        if _should_skip(path, additional_skip_dirs):
+            report_skipped(
+                info.filename,
+                "Generated, dependency, or hidden paths are skipped.",
+            )
             continue
 
         language = EXTENSION_MAP.get(path.suffix.lower())
         if language is None:
+            report_skipped(info.filename, "Unsupported source file type.")
             continue
         if info.file_size > MAX_FILE_IN_ZIP:
             skipped_large += 1
+            report_skipped(
+                info.filename,
+                f"File exceeds the {MAX_FILE_IN_ZIP // (1024*1024)} MB ZIP source-file limit.",
+            )
             continue
 
+        if len(entries) >= MAX_FILES:
+            report_skipped(
+                info.filename,
+                f"ZIP source-file limit ({MAX_FILES}) was reached.",
+            )
+            continue
         total_bytes += info.file_size
         if total_bytes > MAX_TOTAL_BYTES:
             raise ValueError(
                 f"ZIP archive total extracted size exceeds "
                 f"{MAX_TOTAL_BYTES // (1024*1024)} MB limit."
             )
-        if len(entries) >= MAX_FILES:
-            break
         entries.append((info, info.filename, language))
 
     if not entries:
-        raise ValueError(
+        detail = (
             "No supported source files found in the ZIP. "
             f"Supported extensions: {', '.join(EXTENSION_MAP)}"
             + (
@@ -153,10 +197,22 @@ def zip_source_entries(
                 if skipped_large else "."
             )
         )
+        if skipped_files:
+            listed = skipped_files[:10]
+            detail += " Excluded entries: " + "; ".join(
+                f"{item['path']}: {item['reason']}" for item in listed
+            )
+            if len(skipped_files) > len(listed):
+                detail += f"; and {len(skipped_files) - len(listed)} more."
+        raise ValueError(detail)
     return entries
 
 
-def read_zip_archive(data: bytes | BinaryIO) -> list[SourceFile]:
+def read_zip_archive(
+    data: bytes | BinaryIO,
+    skipped_files: list[dict[str, str]] | None = None,
+    additional_skip_dirs: set[str] | None = None,
+) -> list[SourceFile]:
     """
     Extract all recognised source files from a ZIP archive.
     Returns a list of SourceFile objects.
@@ -187,7 +243,11 @@ def read_zip_archive(data: bytes | BinaryIO) -> list[SourceFile]:
     files: list[SourceFile] = []
     archive_file.seek(0)
     with zipfile.ZipFile(archive_file) as zf:
-        for info, path, language in zip_source_entries(zf):
+        for info, path, language in zip_source_entries(
+            zf,
+            skipped_files,
+            additional_skip_dirs,
+        ):
             raw = zf.read(info.filename)
             content = _decode(raw, info.filename)
             files.append(SourceFile(
@@ -213,8 +273,8 @@ def should_skip_path(path: PurePosixPath, additional_dirs: set[str] | None = Non
     return False
 
 
-def _should_skip(path: PurePosixPath) -> bool:
-    return should_skip_path(path)
+def _should_skip(path: PurePosixPath, additional_dirs: set[str] | None = None) -> bool:
+    return should_skip_path(path, additional_dirs)
 
 
 def _decode(data: bytes, filename: str) -> str:

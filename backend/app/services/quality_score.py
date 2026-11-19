@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
 from collections import defaultdict
 from typing import Any, Iterable
@@ -201,6 +202,7 @@ def calculate_project_quality_score(files: Iterable[dict[str, Any]]) -> dict[str
     functions_measured = 0
     complexity_measurable = False
     analyzed_files = 0
+    unique_sources: dict[tuple[str, str], str] = {}
 
     for file in files:
         analyzed_files += 1
@@ -211,8 +213,20 @@ def calculate_project_quality_score(files: Iterable[dict[str, Any]]) -> dict[str
             static_issues=file.get("static_issues", []),
         )
         path = str(file["path"])
-        file_scores.append({"path": path, "score": result["score"]})
-        total_penalty += 100 - result["score"]
+        language = str(file["language"])
+        source_digest = hashlib.sha256(file["code"].encode("utf-8")).hexdigest()
+        source_key = (language.strip().lower(), source_digest)
+        duplicate_of = unique_sources.get(source_key)
+        if duplicate_of is None:
+            unique_sources[source_key] = path
+        file_score = {
+            "path": path,
+            "language": language,
+            "score": result["score"],
+        }
+        if duplicate_of is not None:
+            file_score["duplicate_of"] = duplicate_of
+        file_scores.append(file_score)
         metrics = result["metrics"]
         nonblank_lines += metrics["nonblank_lines"]
         if metrics["complexity_measurable"]:
@@ -220,6 +234,9 @@ def calculate_project_quality_score(files: Iterable[dict[str, Any]]) -> dict[str
             functions_measured += metrics["functions_measured"] or 0
             measured = metrics["max_cyclomatic_complexity"]
             max_complexity = max(max_complexity or 0, measured or 0)
+        if duplicate_of is not None:
+            continue
+        total_penalty += 100 - result["score"]
         for category, category_score in result["categories"].items():
             category_penalties[category] += 100 - category_score
         factors.extend(f"{path}: {factor}" for factor in result["factors"])
@@ -251,7 +268,9 @@ def calculate_project_quality_score(files: Iterable[dict[str, Any]]) -> dict[str
             "notes": (
                 "The project score starts at 100 and subtracts each file's unique, confirmed "
                 "finding penalties and measured Python complexity penalties. Findings are "
-                "deduplicated within each file; AI findings below high confidence are excluded."
+                "deduplicated within each file; identical source files in the same language "
+                "contribute only once to the project total. AI findings below high confidence "
+                "are excluded."
             ),
         },
     }

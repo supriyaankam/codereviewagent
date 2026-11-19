@@ -217,6 +217,7 @@ class ReviewRequest(BaseModel):
     project_name: str = Field(..., min_length=1, max_length=120)
     language:     str = Field(..., min_length=1, max_length=60)
     code:         str = Field(..., min_length=1, max_length=100_000)
+    language_confirmed: bool = False
 
 
 class AIIssue(BaseModel):
@@ -234,6 +235,8 @@ class AIIssue(BaseModel):
 class ReviewResponse(BaseModel):
     review_id:      str
     language:       str
+    detected_language: Optional[str] = None
+    language_validation_status: Optional[str] = None
     project_name:   str
     overall_risk:   Optional[str] = None
     summary:        str

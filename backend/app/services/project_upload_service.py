@@ -371,8 +371,13 @@ def create_upload(owner_id: str, name: str, files: list[dict[str, Any]]) -> dict
 def create_upload_from_archive(owner_id: str, name: str, archive_bytes: bytes) -> dict[str, Any]:
     from app.services.upload_service import read_zip_archive
 
+    archive_skipped_files: list[dict[str, str]] = []
     try:
-        source_files = read_zip_archive(archive_bytes)
+        source_files = read_zip_archive(
+            archive_bytes,
+            archive_skipped_files,
+            additional_skip_dirs(),
+        )
     except (
         ValueError,
         OSError,
@@ -399,6 +404,7 @@ def create_upload_from_archive(owner_id: str, name: str, archive_bytes: bytes) -
             destination = session_dir / "project" / Path(*PurePosixPath(file_info["path"]).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(source.content.encode("utf-8"))
+        manifest["archive_skipped_files"] = archive_skipped_files
         stored_in_cloud = project_cloud_service.upload_project_files(
             upload_id,
             owner_id,
@@ -437,6 +443,7 @@ def create_upload_from_archive_file(
 
     upload_id = ""
     session_dir: Path | None = None
+    archive_skipped_files: list[dict[str, str]] = []
     try:
         archive_file.seek(0, os.SEEK_END)
         archive_size = archive_file.tell()
@@ -452,7 +459,11 @@ def create_upload_from_archive_file(
 
         with zipfile.ZipFile(archive_file) as archive:
             try:
-                entries = zip_source_entries(archive)
+                entries = zip_source_entries(
+                    archive,
+                    archive_skipped_files,
+                    additional_skip_dirs(),
+                )
             except ValueError as exc:
                 raise ProjectUploadError(str(exc), 422) from exc
             status = create_upload(
@@ -462,6 +473,8 @@ def create_upload_from_archive_file(
             )
             upload_id = status["upload_id"]
             session_dir, manifest = _session_for_user(upload_id, owner_id)
+            manifest["archive_skipped_files"] = archive_skipped_files
+            _write_manifest(session_dir, manifest)
             total_written = 0
             for index, (info, path, _) in enumerate(entries):
                 destination = session_dir / "project" / Path(*PurePosixPath(path).parts)
@@ -818,6 +831,7 @@ def project_files(upload_id: str, owner_id: str) -> dict[str, Any]:
         "metadata_persisted": manifest.get("firebase_metadata_persisted", False),
         "total_files": len(files),
         "selectable_files": sum(file_info["selectable"] for file_info in files),
+        "excluded_files": manifest.get("archive_skipped_files", []),
         "analysis_limits": analysis_limits(),
         "files": files,
     }
@@ -869,7 +883,7 @@ def analyze_project_files(
                 "processed_indices": [],
                 "results": {},
                 "errors": [],
-                "skipped_files": [],
+                "skipped_files": list(manifest.get("archive_skipped_files", [])),
             }
         elif not analysis_state:
             raise ProjectUploadError("Start a new analysis before submitting another batch.", 409)
@@ -894,6 +908,19 @@ def analyze_project_files(
             ]
         except Exception:
             logger.exception("Could not load team standards for project analysis.")
+    standards_digest = hashlib.sha256(
+        json.dumps(team_standards, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    analysis_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for cached_result in analysis_state.get("results", {}).values():
+        cache_key = (
+            str(cached_result.get("language", "")),
+            str(cached_result.get("source_sha256", "")),
+            str(cached_result.get("standards_sha256", "")),
+        )
+        if all(cache_key):
+            analysis_cache.setdefault(cache_key, cached_result)
+
     for index in file_indices:
         file_info = manifest["files"][index]
         reason = _source_skip_reason(session_dir, index, file_info)
@@ -932,6 +959,22 @@ def analyze_project_files(
         except UnicodeDecodeError:
             content = raw.decode("latin-1")
         language = EXTENSION_MAP[path.suffix.lower()]
+        source_digest = hashlib.sha256(raw).hexdigest()
+        cache_key = (language, source_digest, standards_digest)
+        cached_result = analysis_cache.get(cache_key)
+        if cached_result is not None:
+            results.append({
+                **cached_result,
+                "file_index": index,
+                "path": file_info["path"],
+                "source_sha256": source_digest,
+                "duplicate_of": (
+                    cached_result.get("duplicate_of")
+                    or cached_result.get("path", file_info["path"])
+                ),
+                "analysis_reused": True,
+            })
+            continue
         try:
             static_result = analyze_code(
                 language=language,
@@ -979,9 +1022,12 @@ def analyze_project_files(
                 "ai_failure_category": ai_result.get("failure_category"),
                 "ai_code_truncated": len(content) > 12_000,
                 "summary": ai_result.get("summary", ""),
-                "source_sha256": hashlib.sha256(raw).hexdigest(),
+                "source_sha256": source_digest,
+                "standards_sha256": standards_digest,
+                "analysis_reused": False,
             }
             results.append(result)
+            analysis_cache.setdefault(cache_key, result)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Could not analyze project file %s", file_info["path"])
             errors.append({"path": file_info["path"], "error": "Analysis failed for this file."})
@@ -1041,6 +1087,8 @@ def analyze_project_files(
             "errors": latest_state.get("errors", []),
             "complete": latest_state["complete"],
             "languages": sorted({result["language"] for result in combined_results}),
+            "reused": sum(bool(result.get("analysis_reused")) for result in combined_results),
+            "duplicate_files": sum(bool(result.get("duplicate_of")) for result in combined_results),
             "ai_calls_limited_to_selected_files": True,
             "maximum_files_per_batch": limits["maximum_request_files"],
             "maximum_source_bytes_per_batch": limits["maximum_batch_bytes"],

@@ -15,7 +15,26 @@ export async function submitReview(body, currentUser) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(data.detail || `Review request failed (HTTP ${response.status}).`);
+    const detail = data.detail;
+    const error = new Error(
+      typeof detail === 'string'
+        ? detail
+        : detail?.message || `Review request failed (HTTP ${response.status}).`,
+    );
+    if (
+      detail
+      && typeof detail === 'object'
+      && !Array.isArray(detail)
+      && [
+        'empty_code',
+        'unsupported_language',
+        'language_mismatch',
+        'language_ambiguous',
+      ].includes(detail.code)
+    ) {
+      error.languageValidation = detail;
+    }
+    throw error;
   }
   if (data.saved_to_db !== true || !data.review_id || data.review_id === 'local') {
     throw new Error('The review was analyzed but not saved to Firestore. Please retry.');

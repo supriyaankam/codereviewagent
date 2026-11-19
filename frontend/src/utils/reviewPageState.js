@@ -13,14 +13,22 @@ export function getReviewPageMode(searchParams) {
   return reviewId ? { type: 'saved', reviewId } : { type: 'new' };
 }
 
-export function createReviewRequest({ userId, projectName, language, code }) {
-  return {
+export function createReviewRequest({
+  userId,
+  projectName,
+  language,
+  code,
+  languageConfirmed = false,
+}) {
+  const request = {
     user_id: userId,
     project_id: 'global',
     project_name: projectName.trim(),
     language,
     code,
   };
+  if (languageConfirmed) request.language_confirmed = true;
+  return request;
 }
 
 export function findingIdentity(issue) {

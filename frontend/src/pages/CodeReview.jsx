@@ -23,8 +23,23 @@ import '../styles/CodeReview.css';
 
 const LANGUAGES = [
   'Python', 'JavaScript', 'TypeScript', 'Java', 'C#',
-  'C++', 'Go', 'Rust', 'Ruby', 'PHP', 'Swift', 'Kotlin', 'Other',
+  'C', 'C++', 'Go', 'Rust', 'Ruby', 'PHP', 'Swift', 'Kotlin', 'Other',
 ];
+const LANGUAGE_LABELS = {
+  python: 'Python',
+  javascript: 'JavaScript',
+  typescript: 'TypeScript',
+  java: 'Java',
+  csharp: 'C#',
+  c: 'C',
+  cpp: 'C++',
+  go: 'Go',
+  rust: 'Rust',
+  ruby: 'Ruby',
+  php: 'PHP',
+  swift: 'Swift',
+  kotlin: 'Kotlin',
+};
 
 const SEVERITY_META = {
   critical: { color: 'danger',    icon: 'bi-x-octagon-fill',      label: 'Critical' },
@@ -691,6 +706,17 @@ function ReviewResults({
         </div>
       </div>
 
+      {result.language_validation_status && (
+        <div className="alert alert-light border small" role="status">
+          Selected language: <strong>{language}</strong>
+          {' · '}Detected language: <strong>
+            {result.language_validation_status === 'confirmed_ambiguous'
+              ? `${result.detected_language} (user-confirmed)`
+              : result.detected_language || 'not confidently determined'}
+          </strong>
+        </div>
+      )}
+
       <QualityScore qualityScore={result.quality_score} />
 
       {result.restorationUnavailable?.length > 0 && (
@@ -920,6 +946,8 @@ ReviewResults.propTypes = {
       capabilities: PropTypes.arrayOf(PropTypes.string),
     }),
     review_id: PropTypes.string,
+    detected_language: PropTypes.string,
+    language_validation_status: PropTypes.string,
     quality_score: PropTypes.object,
     auto_fix: PropTypes.shape({
       ineffective_finding_keys: PropTypes.arrayOf(PropTypes.string),
@@ -1262,6 +1290,8 @@ export default function CodeReview() {
   const [loading, setLoading] = useState(false);
   const [restoreLoading, setRestoreLoading] = useState(Boolean(searchParams.get('review_id')));
   const [error, setError]     = useState(initialSession.error);
+  const [languageValidation, setLanguageValidation] = useState(null);
+  const [languageConfirmed, setLanguageConfirmed] = useState(false);
   const [result, setResult]   = useState(initialSession.result);
   const [reviewedCode, setReviewedCode] = useState(initialSession.reviewedCode);
   const [sourceChanged, setSourceChanged] = useState(initialSession.sourceChanged);
@@ -1277,6 +1307,8 @@ export default function CodeReview() {
     if (!requestedReviewId || !currentUser) {
       const emptySession = createEmptyReviewSession();
       setForm(emptySession.form);
+      setLanguageValidation(null);
+      setLanguageConfirmed(false);
       setReviewedCode(emptySession.reviewedCode);
       setResult(emptySession.result);
       setSourceChanged(emptySession.sourceChanged);
@@ -1290,6 +1322,8 @@ export default function CodeReview() {
     setError('');
     const emptySession = createEmptyReviewSession();
     setForm(emptySession.form);
+    setLanguageValidation(null);
+    setLanguageConfirmed(false);
     setReviewedCode(emptySession.reviewedCode);
     setResult(emptySession.result);
     setSourceChanged(emptySession.sourceChanged);
@@ -1327,6 +1361,17 @@ export default function CodeReview() {
     if (result) setResult(null);   // reset results on form change
     setSourceChanged(false);
     setError('');
+    setLanguageValidation(null);
+    setLanguageConfirmed(false);
+  }
+
+  function chooseLanguage(language, confirm = false) {
+    const option = LANGUAGE_LABELS[language?.toLowerCase()];
+    if (!option) return;
+    setForm((current) => ({ ...current, language: option }));
+    setLanguageConfirmed(confirm);
+    setLanguageValidation(null);
+    setError('');
   }
 
   const runReview = useCallback(async () => {
@@ -1336,6 +1381,7 @@ export default function CodeReview() {
     }
     setLoading(true);
     setError('');
+    setLanguageValidation(null);
     setResult(null);
     setSourceChanged(false);
 
@@ -1350,17 +1396,23 @@ export default function CodeReview() {
         projectName: form.project,
         language: form.language,
         code: codeBeingReviewed,
+        languageConfirmed,
       });
 
       const data = await submitReview(body, currentUser);
       setResult(data);
       setReviewedCode(codeBeingReviewed);
     } catch (err) {
-      setError(err.message || 'Could not complete the review. Is the backend running?');
+      if (err.languageValidation) {
+        setLanguageValidation(err.languageValidation);
+        setError('');
+      } else {
+        setError(err.message || 'Could not complete the review. Is the backend running?');
+      }
     } finally {
       setLoading(false);
     }
-  }, [form, currentUser, requestedReviewId, setSearchParams]);
+  }, [form, currentUser, languageConfirmed, requestedReviewId, setSearchParams]);
 
   const handleSubmit = useCallback((event) => {
     event.preventDefault();
@@ -1401,6 +1453,7 @@ export default function CodeReview() {
           projectName: form.project,
           language: form.language,
           code: fixedCode,
+          languageConfirmed,
         });
         updatedReview = await submitReview(body, currentUser);
       } catch (reviewError) {
@@ -1437,6 +1490,8 @@ export default function CodeReview() {
     setSearchParams({ new: '1' }, { replace: true });
     const emptySession = createEmptyReviewSession();
     setForm(emptySession.form);
+    setLanguageValidation(null);
+    setLanguageConfirmed(false);
     setResult(emptySession.result);
     setReviewedCode(emptySession.reviewedCode);
     setSourceChanged(emptySession.sourceChanged);
@@ -1537,6 +1592,49 @@ export default function CodeReview() {
                 {error && (
                   <div className="alert alert-danger py-2 small mb-3">
                     <i className="bi bi-exclamation-circle me-2"></i>{error}
+                  </div>
+                )}
+
+                {languageValidation && (
+                  <div className={`alert ${languageValidation.code === 'language_ambiguous' ? 'alert-warning' : 'alert-danger'} py-2 small mb-3`} role="alert">
+                    <strong>
+                      {languageValidation.code === 'language_ambiguous'
+                        ? 'Language is ambiguous.'
+                        : languageValidation.code === 'empty_code'
+                          ? 'Code is empty.'
+                          : 'Language validation failed.'}
+                    </strong>
+                    <div className="mt-1">{languageValidation.message}</div>
+                    <div className="mt-1">
+                      Selected language: <strong>{languageValidation.selected_language || form.language || '—'}</strong>
+                      {' · '}Detected language: <strong>{languageValidation.detected_language
+                        ? (LANGUAGE_LABELS[languageValidation.detected_language] || languageValidation.detected_language)
+                        : 'undetermined'}</strong>
+                    </div>
+                    {languageValidation.candidates?.length > 0 && (
+                      <div className="d-flex gap-2 flex-wrap mt-2">
+                        {languageValidation.candidates.map((candidate) => (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-outline-secondary"
+                            key={candidate}
+                            onClick={() => chooseLanguage(candidate, true)}
+                          >
+                            Use {LANGUAGE_LABELS[candidate] || candidate}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {languageValidation.code === 'language_ambiguous'
+                      && languageValidation.candidates?.includes(form.language.toLowerCase()) && (
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-primary mt-2"
+                          onClick={() => chooseLanguage(form.language.toLowerCase(), true)}
+                        >
+                          Confirm {form.language} and continue
+                        </button>
+                      )}
                   </div>
                 )}
 

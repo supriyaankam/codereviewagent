@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from tree_sitter import Node, Tree
 
 from tree_sitter_language_pack import get_parser
@@ -29,6 +30,28 @@ _PARSER_NAMES = {
     "rust": "rust",
     "kotlin": "kotlin",
     "swift": "swift",
+}
+_CANONICAL_LANGUAGES = (
+    "python",
+    "javascript",
+    "typescript",
+    "java",
+    "csharp",
+    "go",
+    "ruby",
+    "php",
+    "cpp",
+    "c",
+    "rust",
+    "kotlin",
+    "swift",
+)
+_LANGUAGE_ALIASES = {
+    "py": "python",
+    "js": "javascript",
+    "ts": "typescript",
+    "c#": "csharp",
+    "c++": "cpp",
 }
 _IDENTIFIER_NODE_TYPES = {
     "identifier",
@@ -80,6 +103,13 @@ def _parser_name(language: str) -> str | None:
     return _PARSER_NAMES.get(language.strip().lower())
 
 
+def canonical_language(language: str) -> str | None:
+    """Return a canonical supported language name, or None for unknown labels."""
+    normalized = language.strip().lower()
+    normalized = _LANGUAGE_ALIASES.get(normalized, normalized)
+    return normalized if normalized in _CANONICAL_LANGUAGES else None
+
+
 def _parse_source(language: str, code: str) -> Tree | None:
     parser_name = _parser_name(language)
     if parser_name is None:
@@ -96,6 +126,173 @@ def _parse_source(language: str, code: str) -> Tree | None:
             return tree
         last_tree = tree
     return last_tree
+
+
+def _detection_source(code: str) -> str:
+    source = re.sub(r"/\*.*?\*/", " ", code, flags=re.DOTALL)
+    source = re.sub(r"//[^\r\n]*", " ", source)
+    source = re.sub(
+        r"(?m)^\s*#(?!\s*include\b)[^\r\n]*",
+        " ",
+        source,
+    )
+    return re.sub(
+        r'''(?s)(?:"""(?:\\.|[^\\])*?"""|''' + "'''(?:\\\\.|[^\\\\])*?'''" + r'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')''',
+        " ",
+        source,
+    )
+
+
+def _has_language_marker(source: str, pattern: str) -> bool:
+    return re.search(pattern, source, flags=re.MULTILINE) is not None
+
+
+def _language_parse_available(language: str, code: str) -> bool:
+    tree = _parse_source(language, code)
+    return tree is not None and not tree.root_node.has_error
+
+
+def _detected_language(language: str) -> dict:
+    return {
+        "status": "detected",
+        "detected_language": language,
+        "candidates": [language],
+    }
+
+
+def _ambiguous_languages(*languages: str) -> dict:
+    return {
+        "status": "ambiguous",
+        "detected_language": None,
+        "candidates": list(languages),
+    }
+
+
+def detect_source_language(code: str) -> dict:
+    """Detect only languages supported by strong syntax cues and their parsers."""
+    if not code.strip():
+        return {
+            "status": "empty",
+            "detected_language": None,
+            "candidates": [],
+        }
+
+    source = _detection_source(code)
+
+    if _has_language_marker(
+        source,
+        r"^\s*(?:async\s+)?def\s+[A-Za-z_]\w*\s*\([^)]*\)\s*(?:->\s*[^:]+)?\s*:",
+    ) and _language_parse_available("python", code):
+        return _detected_language("python")
+
+    if _has_language_marker(
+        source,
+        r"\binterface\s+[A-Za-z_$]\w*|\btype\s+[A-Za-z_$]\w*\s*=|"
+        r"\b(?:const|let|var)\s+[A-Za-z_$]\w*\s*:\s*[A-Za-z_$]\w*",
+    ):
+        if _language_parse_available("typescript", code):
+            return _ambiguous_languages("javascript", "typescript")
+
+    if _has_language_marker(
+        source,
+        r"(?:#\s*include\s*[<\"]iostream[>\"]|\bstd::|\btemplate\s*<|\bnamespace\s+std\b)",
+    ) and _language_parse_available("cpp", code):
+        return _detected_language("cpp")
+
+    if _has_language_marker(
+        source,
+        r"\b(?:_Generic|_Bool|_Atomic|_Static_assert)\b|\brestrict\b",
+    ) and _language_parse_available("c", code):
+        return _detected_language("c")
+
+    if _has_language_marker(
+        source,
+        r"^\s*#\s*include\b|"
+        r"\b(?:void|int|char|float|double|long|short|unsigned)\s+"
+        r"(?:main|[A-Za-z_]\w*)\s*\([^)]*\)\s*\{",
+    ):
+        c_valid = _language_parse_available("c", code)
+        cpp_valid = _language_parse_available("cpp", code)
+        if c_valid or cpp_valid:
+            return _ambiguous_languages("c", "cpp")
+
+    if _has_language_marker(
+        source,
+        r"\bSystem\.out\.(?:print|println)\s*\(|"
+        r"\bpublic\s+static\s+void\s+main\s*\(\s*String\s*\[\s*\]",
+    ) and _language_parse_available("java", code):
+        return _detected_language("java")
+
+    if _has_language_marker(
+        source,
+        r"\bConsole\.(?:WriteLine|Write)\s*\(|\busing\s+System\s*;",
+    ) and _language_parse_available("csharp", code):
+        return _detected_language("csharp")
+
+    if _has_language_marker(source, r"\bpublic\s+class\s+[A-Za-z_]\w*") and (
+        _language_parse_available("java", code)
+        or _language_parse_available("csharp", code)
+    ):
+        return _ambiguous_languages("java", "csharp")
+
+    if _has_language_marker(
+        source,
+        r"\bpackage\s+main\b|\bfmt\.(?:Print|Fprint|Sprint)",
+    ) and _language_parse_available("go", code):
+        return _detected_language("go")
+
+    if _has_language_marker(source, r"<\?php\b") and _language_parse_available("php", code):
+        return _detected_language("php")
+
+    if _has_language_marker(
+        source,
+        r"^\s*(?:async\s+)?def\s+[A-Za-z_]\w*\s*(?:\([^)]*\))?\s*$|^\s*puts\b",
+    ) and _language_parse_available("ruby", code):
+        return _detected_language("ruby")
+
+    if _has_language_marker(
+        source,
+        r"\bfn\s+main\s*\(|\bprintln!\s*\(|\buse\s+std::",
+    ) and _language_parse_available("rust", code):
+        return _detected_language("rust")
+
+    if _has_language_marker(
+        source,
+        r"\bfun\s+main\s*\(|\bval\s+[A-Za-z_]\w*\s*:\s*[A-Z]",
+    ) and _language_parse_available("kotlin", code):
+        return _detected_language("kotlin")
+
+    if _has_language_marker(
+        source,
+        r"\bimport\s+Foundation\b|^\s*@main\b",
+    ) and _language_parse_available("swift", code):
+        return _detected_language("swift")
+
+    javascript_markers = (
+        r"\bconsole\.(?:log|warn|error|info)\s*\(",
+        r"\bmodule\.exports\b",
+        r"\brequire\s*\(",
+        r"\bdocument\.",
+        r"\bprocess\.env\b",
+    )
+    if any(_has_language_marker(source, marker) for marker in javascript_markers):
+        if _language_parse_available("javascript", code):
+            return _detected_language("javascript")
+
+    if _has_language_marker(
+        source,
+        r"\b(?:const|let|var|function|export|import)\b",
+    ):
+        js_valid = _language_parse_available("javascript", code)
+        ts_valid = _language_parse_available("typescript", code)
+        if js_valid and ts_valid:
+            return _ambiguous_languages("javascript", "typescript")
+
+    return {
+        "status": "unknown",
+        "detected_language": None,
+        "candidates": [],
+    }
 
 
 def source_identifiers(language: str, code: str) -> set[str] | None:

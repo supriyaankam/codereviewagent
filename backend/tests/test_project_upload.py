@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from app.routers.fix import require_project_upload_user
 from app.services import project_cloud_service
 from app.services import project_upload_service as uploads
-from app.services.upload_service import read_zip_archive
+from app.services.upload_service import EXTENSION_MAP, read_zip_archive
 
 
 class ProjectUploadTests(unittest.TestCase):
@@ -279,6 +279,199 @@ class ProjectUploadTests(unittest.TestCase):
         self.assertIn("Unsupported", files[0]["skip_reason"])
         self.assertFalse(files[1]["selectable"])
         self.assertIn("Binary", files[1]["skip_reason"])
+
+    def test_project_source_extensions_cover_supported_language_variants(self):
+        for extension, language in {
+            ".pyi": "python",
+            ".mjs": "javascript",
+            ".cjs": "javascript",
+            ".mts": "typescript",
+            ".cts": "typescript",
+            ".cc": "cpp",
+            ".cxx": "cpp",
+            ".c++": "cpp",
+            ".hpp": "cpp",
+            ".hh": "cpp",
+            ".hxx": "cpp",
+            ".kts": "kotlin",
+        }.items():
+            with self.subTest(extension=extension):
+                self.assertEqual(EXTENSION_MAP[extension], language)
+
+    def test_nested_mixed_language_project_uses_each_file_parser_and_scores_findings(self):
+        sources = {
+            "frontend/src/calc.mjs": (
+                "function divide(value) {\n  return value / 0;\n}\n"
+            ).encode(),
+            "backend/math.py": (
+                "def divide(value):\n    return value / 0\n"
+            ).encode(),
+            "native/src/math.cxx": (
+                "double divide(double value) {\n  return value / 0;\n}\n"
+            ).encode(),
+            "README.md": b"not source",
+            "build/generated.js": b"function generated(value) { return value / 0; }\n",
+        }
+        session = self.create([
+            {"path": path, "size": len(content)}
+            for path, content in sources.items()
+        ])
+        for index, content in enumerate(sources.values()):
+            self.put_file(session["upload_id"], index, content)
+        uploads.complete_upload(session["upload_id"], "user-1")
+
+        files = uploads.project_files(session["upload_id"], "user-1")["files"]
+        self.assertEqual(
+            [files[index]["language"] for index in range(3)],
+            ["javascript", "python", "cpp"],
+        )
+        self.assertFalse(files[3]["selectable"])
+        self.assertIn("Unsupported", files[3]["skip_reason"])
+        self.assertFalse(files[4]["selectable"])
+        self.assertIn("Generated", files[4]["skip_reason"])
+
+        with patch(
+            "app.services.ai_reviewer.run_ai_review",
+            return_value={"issues": [], "ai_available": False, "summary": ""},
+        ) as ai_review:
+            result = uploads.analyze_project_files(
+                session["upload_id"],
+                "user-1",
+                [0, 1, 2],
+                reset=True,
+                selected_file_indices=[0, 1, 2],
+            )
+        findings_by_path = {
+            item["path"]: [
+                issue for issue in item["static_issues"]
+                if issue["title"] == "Division or remainder by zero literal"
+            ]
+            for item in result["results"]
+        }
+
+        self.assertEqual(ai_review.call_count, 3)
+        self.assertEqual(result["summary"]["languages"], ["cpp", "javascript", "python"])
+        self.assertEqual(result["summary"]["analyzed"], 3)
+        for path in list(sources)[:3]:
+            with self.subTest(path=path):
+                self.assertEqual(len(findings_by_path[path]), 1)
+                self.assertEqual(findings_by_path[path][0]["line"], 2)
+
+        score = uploads.project_quality_score(session["upload_id"], "user-1")
+        self.assertEqual(score["metrics"]["analyzed_files"], 3)
+        self.assertLess(score["score"], 100)
+        self.assertEqual(
+            {(item["path"], item["language"]) for item in score["files"]},
+            {
+                ("frontend/src/calc.mjs", "javascript"),
+                ("backend/math.py", "python"),
+                ("native/src/math.cxx", "cpp"),
+            },
+        )
+
+    def test_project_upload_scores_constant_zero_divisor_expression(self):
+        source = b"def divide(value):\n    return value / (2 - 2)\n"
+        session = self.create([{"path": "nested/math.py", "size": len(source)}])
+        self.put_file(session["upload_id"], 0, source)
+        uploads.complete_upload(session["upload_id"], "user-1")
+
+        with patch(
+            "app.services.ai_reviewer.run_ai_review",
+            return_value={"issues": [], "ai_available": False, "summary": ""},
+        ):
+            result = uploads.analyze_project_files(
+                session["upload_id"],
+                "user-1",
+                [0],
+                reset=True,
+                selected_file_indices=[0],
+            )
+
+        findings = [
+            issue for issue in result["results"][0]["static_issues"]
+            if issue["title"] == "Division or remainder by constant zero expression"
+        ]
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["line"], 2)
+
+        score = uploads.project_quality_score(session["upload_id"], "user-1")
+        self.assertLess(score["score"], 100)
+        self.assertEqual(score["files"][0]["path"], "nested/math.py")
+
+    def test_project_upload_tracks_zero_divisor_variables(self):
+        source = (
+            "function divide(value) {\n"
+            "  let divisor = 2;\n"
+            "  divisor = 0;\n"
+            "  return value / divisor;\n"
+            "}\n"
+        ).encode()
+        session = self.create([{"path": "src/math.js", "size": len(source)}])
+        self.put_file(session["upload_id"], 0, source)
+        uploads.complete_upload(session["upload_id"], "user-1")
+
+        with patch(
+            "app.services.ai_reviewer.run_ai_review",
+            return_value={"issues": [], "ai_available": False, "summary": ""},
+        ):
+            result = uploads.analyze_project_files(
+                session["upload_id"],
+                "user-1",
+                [0],
+                reset=True,
+                selected_file_indices=[0],
+            )
+
+        findings = [
+            issue for issue in result["results"][0]["static_issues"]
+            if issue["source"] == "tree_sitter_value_tracking"
+        ]
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["line"], 4)
+
+        score = uploads.project_quality_score(session["upload_id"], "user-1")
+        self.assertLess(score["score"], 100)
+        self.assertEqual(score["files"][0]["path"], "src/math.js")
+
+    def test_identical_project_files_reuse_analysis_across_bounded_batches(self):
+        source = b"function calculate(value) { return value + 1; }\n"
+        session = self.create([
+            {"path": "src/main.js", "size": len(source)},
+            {"path": "copy/main.js", "size": len(source)},
+        ])
+        self.put_file(session["upload_id"], 0, source)
+        self.put_file(session["upload_id"], 1, source)
+        uploads.complete_upload(session["upload_id"], "user-1")
+
+        with patch.dict(os.environ, {"PROJECT_MAX_ANALYSIS_REQUEST_FILES": "1"}):
+            with patch(
+                "app.services.code_analyzer.analyze_code",
+                return_value={"issues": [], "supported": True},
+            ) as analyze:
+                with patch(
+                    "app.services.ai_reviewer.run_ai_review",
+                    return_value={"issues": [], "ai_available": True, "summary": ""},
+                ) as ai_review:
+                    uploads.analyze_project_files(
+                        session["upload_id"],
+                        "user-1",
+                        [0],
+                        reset=True,
+                        selected_file_indices=[0, 1],
+                    )
+                    result = uploads.analyze_project_files(
+                        session["upload_id"],
+                        "user-1",
+                        [1],
+                    )
+
+        self.assertEqual(analyze.call_count, 1)
+        self.assertEqual(ai_review.call_count, 1)
+        self.assertEqual(result["results"][0]["path"], "copy/main.js")
+        self.assertTrue(result["results"][0]["analysis_reused"])
+        self.assertEqual(result["results"][0]["duplicate_of"], "src/main.js")
+        self.assertEqual(result["summary"]["reused"], 1)
+        self.assertEqual(result["summary"]["duplicate_files"], 1)
 
     def test_analysis_only_processes_selected_files(self):
         session = self.create([
@@ -722,14 +915,99 @@ class ProjectUploadTests(unittest.TestCase):
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as zip_file:
             zip_file.writestr("demo/src/main.py", "print('safe')\n")
+            zip_file.writestr("demo/client/app.mjs", "const value = 1;\n")
             zip_file.writestr("demo/README.md", "Project")
+            zip_file.writestr("demo/build/generated.js", "const ignored = 1;\n")
 
         project = uploads.create_upload_from_archive(
             "user-1", "demo.zip", archive.getvalue()
         )
         self.assertEqual(project["name"], "demo")
-        self.assertEqual([item["path"] for item in project["files"]], ["demo/src/main.py"])
-        self.assertTrue(project["files"][0]["selectable"])
+        self.assertEqual(
+            [item["path"] for item in project["files"]],
+            ["demo/src/main.py", "demo/client/app.mjs"],
+        )
+        self.assertEqual(
+            [item["language"] for item in project["files"]],
+            ["python", "javascript"],
+        )
+        self.assertEqual(
+            {item["path"] for item in project["excluded_files"]},
+            {"demo/README.md", "demo/build/generated.js"},
+        )
+
+    def test_mixed_language_zip_analysis_reports_skipped_entries(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zip_file:
+            zip_file.writestr(
+                "demo/src/app.mjs",
+                "function divide(value) {\n  return value / 0;\n}\n",
+            )
+            zip_file.writestr(
+                "demo/lib/math.py",
+                "def divide(value):\n    return value / 0\n",
+            )
+            zip_file.writestr("demo/docs/README.md", "Documentation")
+            zip_file.writestr("demo/node_modules/dep/index.js", "const ignored = 1;\n")
+            zip_file.writestr("demo/vendor/library.js", "const ignored = 2;\n")
+
+        with patch.dict(os.environ, {"PROJECT_UPLOAD_SKIP_DIRS": "vendor"}):
+            project = uploads.create_upload_from_archive(
+                "user-1", "demo.zip", archive.getvalue()
+            )
+        with patch(
+            "app.services.ai_reviewer.run_ai_review",
+            return_value={"issues": [], "ai_available": False, "summary": ""},
+        ):
+            analysis = uploads.analyze_project_files(
+                project["upload_id"],
+                "user-1",
+                [0, 1],
+                reset=True,
+                selected_file_indices=[0, 1],
+            )
+
+        self.assertEqual(analysis["summary"]["languages"], ["javascript", "python"])
+        self.assertEqual(analysis["summary"]["skipped"], 3)
+        self.assertEqual(
+            {item["path"] for item in analysis["summary"]["skipped_files"]},
+            {
+                "demo/docs/README.md",
+                "demo/node_modules/dep/index.js",
+                "demo/vendor/library.js",
+            },
+        )
+        self.assertTrue(all(
+            any(issue["title"] == "Division or remainder by zero literal" for issue in file["static_issues"])
+            for file in analysis["results"]
+        ))
+
+    def test_zip_with_only_unsupported_files_reports_paths_and_reasons(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zip_file:
+            zip_file.writestr("demo/README.md", "Documentation")
+
+        with self.assertRaises(uploads.ProjectUploadError) as unsupported:
+            uploads.create_upload_from_archive("user-1", "demo.zip", archive.getvalue())
+
+        self.assertIn("demo/README.md", unsupported.exception.detail)
+        self.assertIn("Unsupported source file type", unsupported.exception.detail)
+
+    def test_zip_source_file_limit_reports_unprocessed_paths(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zip_file:
+            zip_file.writestr("src/main.py", "print('safe')\n")
+            zip_file.writestr("src/app.js", "console.log('safe');\n")
+        skipped = []
+
+        with patch("app.services.upload_service.MAX_FILES", 1):
+            files = read_zip_archive(archive.getvalue(), skipped)
+
+        self.assertEqual([item.path for item in files], ["src/main.py"])
+        self.assertEqual(skipped, [{
+            "path": "src/app.js",
+            "reason": "ZIP source-file limit (1) was reached.",
+        }])
 
     def test_authenticated_project_analysis_score_fix_and_restore_endpoints(self):
         from fastapi.testclient import TestClient

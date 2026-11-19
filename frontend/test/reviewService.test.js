@@ -70,6 +70,144 @@ test('shows persistence errors returned by the review API', async () => {
   );
 });
 
+test('preserves language validation responses for matched, mismatched, ambiguous, empty, and unsupported code', async () => {
+  const cases = [
+    {
+      status: 201,
+      body: {
+        review_id: 'javascript-review',
+        saved_to_db: true,
+        detected_language: 'javascript',
+      },
+      request: { language: 'JavaScript', code: 'console.log("hi");' },
+      expectedLanguage: 'javascript',
+    },
+    {
+      status: 201,
+      body: {
+        review_id: 'c-review',
+        saved_to_db: true,
+        detected_language: 'c',
+      },
+      request: { language: 'C', code: 'int main() { return 0; }' },
+      expectedLanguage: 'c',
+    },
+    {
+      status: 422,
+      body: {
+        detail: {
+          code: 'language_mismatch',
+          message: 'Selected JavaScript, detected C.',
+          selected_language: 'JavaScript',
+          detected_language: 'c',
+          candidates: ['c'],
+        },
+      },
+      request: { language: 'JavaScript', code: 'int main(void) {}' },
+      expectedCode: 'language_mismatch',
+      expectedDetected: 'c',
+    },
+    {
+      status: 422,
+      body: {
+        detail: {
+          code: 'language_mismatch',
+          message: 'Selected Python, detected Java.',
+          selected_language: 'Python',
+          detected_language: 'java',
+          candidates: ['java'],
+        },
+      },
+      request: { language: 'Python', code: 'public class Main {}' },
+      expectedCode: 'language_mismatch',
+      expectedDetected: 'java',
+    },
+    {
+      status: 409,
+      body: {
+        detail: {
+          code: 'language_ambiguous',
+          message: 'The source is compatible with JavaScript and TypeScript.',
+          selected_language: 'JavaScript',
+          detected_language: null,
+          candidates: ['javascript', 'typescript'],
+        },
+      },
+      request: { language: 'JavaScript', code: 'const count: number = 1;' },
+      expectedCode: 'language_ambiguous',
+      expectedDetected: null,
+    },
+    {
+      status: 422,
+      body: {
+        detail: {
+          code: 'empty_code',
+          message: 'Code must not be empty.',
+          selected_language: 'JavaScript',
+          detected_language: null,
+          candidates: [],
+        },
+      },
+      request: { language: 'JavaScript', code: '   ' },
+      expectedCode: 'empty_code',
+      expectedDetected: null,
+    },
+    {
+      status: 422,
+      body: {
+        detail: {
+          code: 'unsupported_language',
+          message: 'Unsupported language selection.',
+          selected_language: 'Fortran',
+          detected_language: null,
+          candidates: [],
+        },
+      },
+      request: { language: 'Fortran', code: 'program hello' },
+      expectedCode: 'unsupported_language',
+      expectedDetected: null,
+    },
+  ];
+
+  for (const testCase of cases) {
+    globalThis.fetch = async (_url, options) => {
+      assert.equal(JSON.parse(options.body).language, testCase.request.language);
+      return new Response(JSON.stringify(testCase.body), {
+        status: testCase.status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    if (testCase.expectedLanguage) {
+      const response = await submitReview(
+        { user_id: 'user-1', ...testCase.request },
+        { getIdToken: async () => 'test-token' },
+      );
+      assert.equal(response.detected_language, testCase.expectedLanguage);
+      continue;
+    }
+
+    await assert.rejects(
+      submitReview(
+        { user_id: 'user-1', ...testCase.request },
+        { getIdToken: async () => 'test-token' },
+      ),
+      (error) => {
+        assert.equal(error.languageValidation.code, testCase.expectedCode);
+        assert.equal(
+          error.languageValidation.selected_language,
+          testCase.request.language,
+        );
+        assert.equal(
+          error.languageValidation.detected_language,
+          testCase.expectedDetected,
+        );
+        return true;
+      },
+    );
+  }
+});
+
 test('loads the latest review using authenticated user credentials', async () => {
   globalThis.fetch = async (url, options) => {
     assert.equal(url, '/api/reviews/latest');

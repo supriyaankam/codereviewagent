@@ -16,6 +16,9 @@ from app.analyzers.python_analyzer import (
     run_ast_analysis,
     run_pylint_analysis,
 )
+from app.analyzers.javascript_analyzer import analyze_javascript
+from app.analyzers.tree_sitter_semantic_analyzer import analyze_tree_sitter_semantics
+from app.analyzers.tree_sitter_value_tracker import analyze_tree_sitter_value_tracking
 from app.analyzers.security_analyzer import (
     run_bandit_analysis,
     run_secret_detection,
@@ -141,15 +144,45 @@ def analyze_code(language: str, code: str, team_standards: list[dict] | None = N
     if lang != "python":
         syntax_issues = check_language_syntax(lang, code)
         secret_issues = run_secret_detection(code, lang)
+        semantic_issues = (
+            analyze_tree_sitter_semantics(lang, code)
+            if syntax_issues == []
+            else []
+        )
+        value_tracking_issues = (
+            analyze_tree_sitter_value_tracking(lang, code)
+            if syntax_issues == []
+            else []
+        )
+        javascript_issues = (
+            analyze_javascript(code)
+            if lang in {"javascript", "js"} and not syntax_issues
+            else []
+        )
         standard_issues = _team_standard_issues(language, code, team_standards or [])
-        issues = [*(syntax_issues or []), *secret_issues, *standard_issues]
+        issues = [
+            *(syntax_issues or []),
+            *secret_issues,
+            *semantic_issues,
+            *value_tracking_issues,
+            *javascript_issues,
+            *standard_issues,
+        ]
         issues = _deduplicate(issues)
         issues = _prefer_team_standard_findings(issues)
         issues.sort(key=lambda issue: (_SEVERITY_ORDER.get(issue.severity, 99), issue.line))
         supported = syntax_issues is not None
+        is_javascript = lang in {"javascript", "js"}
         message = (
-            f"Parser-backed syntax validation and enabled team standards are available for {language}; "
-            "general semantic, vulnerability, and lint analysis are not configured for this language."
+            (
+                "Parser-backed syntax validation and conservative JavaScript semantic checks, "
+                "literal credential checks, and enabled team standards are available; general "
+                "vulnerability and lint analysis are not configured."
+                if is_javascript else
+                f"Parser-backed syntax validation, conservative division/remainder-by-zero checks, "
+                f"literal credential checks, and enabled team standards are available for {language}; "
+                "broader semantic, vulnerability, and lint analysis are not configured."
+            )
             if supported else
             f"No static parser is configured for {language}; enabled team standards were checked."
         )
@@ -167,7 +200,8 @@ def analyze_code(language: str, code: str, team_standards: list[dict] | None = N
             "has_syntax_error": any(issue.category == Category.syntax for issue in syntax_issues or []),
             "message":         message,
             "capabilities":    (
-                ["syntax", "secrets", "team_standards"] if supported else ["team_standards"]
+                ["syntax", "semantic", "secrets", "team_standards"]
+                if supported else ["team_standards"]
             ),
         }
 
@@ -193,6 +227,17 @@ def analyze_code(language: str, code: str, team_standards: list[dict] | None = N
         pylint_issues = run_pylint_analysis(code)
         issues.extend(pylint_issues)
         logger.info("[analyzer] pass=pylint  issues=%d", len(pylint_issues))
+
+        # ── Pass 4: shared Tree-sitter semantic checks ───────────────────
+        semantic_issues = analyze_tree_sitter_semantics("python", code)
+        issues.extend(semantic_issues)
+        logger.info("[analyzer] pass=tree_sitter_semantic  issues=%d", len(semantic_issues))
+        value_tracking_issues = analyze_tree_sitter_value_tracking("python", code)
+        issues.extend(value_tracking_issues)
+        logger.info(
+            "[analyzer] pass=tree_sitter_value_tracking  issues=%d",
+            len(value_tracking_issues),
+        )
     else:
         logger.info("[analyzer] skipping AST + Pylint passes due to syntax error")
 
@@ -244,5 +289,7 @@ def analyze_code(language: str, code: str, team_standards: list[dict] | None = N
         "summary":         _build_summary(issues),
         "supported":       True,
         "has_syntax_error": has_syntax_error,
-        "capabilities":    ["syntax", "ast", "pylint", "bandit", "secrets", "team_standards"],
+        "capabilities":    [
+            "syntax", "semantic", "ast", "pylint", "bandit", "secrets", "team_standards",
+        ],
     }

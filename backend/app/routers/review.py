@@ -20,6 +20,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import require_authenticated_user
+from app.analyzers.language_analyzer import canonical_language, detect_source_language
 from app.schemas import ReviewRequest, ReviewResponse
 from app.services.code_analyzer import analyze_code
 from app.services.ai_reviewer import MAX_CODE_CHARS, run_ai_review
@@ -54,6 +55,77 @@ def full_review(
     """
     if body.user_id != authenticated_user:
         raise HTTPException(status_code=403, detail="You may only submit reviews for your own account.")
+    if not body.code.strip():
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "empty_code",
+                "message": "Code must contain at least one non-whitespace character.",
+                "selected_language": body.language,
+                "detected_language": None,
+                "candidates": [],
+            },
+        )
+
+    selected_language = canonical_language(body.language)
+    is_other = body.language.strip().lower() == "other"
+    detection = detect_source_language(body.code)
+    detected_language = detection["detected_language"]
+    if selected_language is None and not is_other:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "unsupported_language",
+                "message": f"'{body.language}' is not a supported language selection.",
+                "selected_language": body.language,
+                "detected_language": detected_language,
+                "candidates": detection["candidates"],
+            },
+        )
+    if detected_language and selected_language != detected_language:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "language_mismatch",
+                "message": (
+                    f"Selected language is {body.language}, but the source strongly "
+                    f"matches {detected_language}."
+                ),
+                "selected_language": body.language,
+                "detected_language": detected_language,
+                "candidates": detection["candidates"],
+            },
+        )
+    if detection["status"] == "ambiguous" and not (
+        body.language_confirmed and selected_language in detection["candidates"]
+    ):
+        candidate_names = ", ".join(detection["candidates"])
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "language_ambiguous",
+                "message": (
+                    f"Language could not be determined confidently. The source is "
+                    f"compatible with {candidate_names}; confirm the selected language to continue."
+                ),
+                "selected_language": body.language,
+                "detected_language": None,
+                "candidates": detection["candidates"],
+            },
+        )
+
+    language_validation_status = (
+        "other"
+        if is_other
+        else "confirmed_ambiguous"
+        if detection["status"] == "ambiguous"
+        else "matched"
+        if detected_language
+        else "undetermined"
+    )
+    if detection["status"] == "ambiguous" and body.language_confirmed:
+        detected_language = selected_language
+
     if not firebase_available():
         raise HTTPException(
             status_code=503,
@@ -144,7 +216,12 @@ def full_review(
             ai_issues=ai_result.get("issues", []),
             static_issues=static_issues,
         )
-        if analysis_succeeded
+        if (
+            analysis_succeeded
+            and static_analysis_succeeded
+            and static_result.get("supported", False)
+            and not is_other
+        )
         else None
     )
     logger.info("[review] AI review complete  ai_issues=%d  overall_risk=%s  ai_available=%s",
@@ -234,6 +311,8 @@ def full_review(
                 ),
                 "static_metadata":   static_metadata,
                 "static_analyzer_metadata": static_metadata,
+                "detected_language": detected_language,
+                "language_validation_status": language_validation_status,
                 "quality_score":     quality_score,
                 "ai_available":      ai_result.get("ai_available", False),
                 "static_analysis_error": static_result.get("failure_category"),
@@ -281,6 +360,8 @@ def full_review(
     return ReviewResponse(
         review_id=review_id,
         language=body.language,
+        detected_language=detected_language,
+        language_validation_status=language_validation_status,
         project_name=body.project_name,
         overall_risk=overall_risk,
         summary=ai_result["summary"],

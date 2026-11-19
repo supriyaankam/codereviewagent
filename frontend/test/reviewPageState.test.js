@@ -107,6 +107,7 @@ test('accepted Auto-Fix submits updated source and retains only fresh findings',
     language: 'Python',
     code: updatedCode,
   });
+
   const resolved = {
     title: 'Mutable default argument',
     category: 'quality',
@@ -146,4 +147,23 @@ test('accepted Auto-Fix submits updated source and retains only fresh findings',
     result.auto_fix.ineffective_finding_keys,
     [findingIdentity(stillPresent)],
   );
+});
+
+test('ambiguous language confirmation is sent only after explicit confirmation', () => {
+  const request = createReviewRequest({
+    userId: 'user-1',
+    projectName: 'demo',
+    language: 'JavaScript',
+    code: 'const count: number = 1;',
+  });
+  const confirmedRequest = createReviewRequest({
+    userId: 'user-1',
+    projectName: 'demo',
+    language: 'JavaScript',
+    code: 'const count: number = 1;',
+    languageConfirmed: true,
+  });
+
+  assert.equal(Object.hasOwn(request, 'language_confirmed'), false);
+  assert.equal(confirmedRequest.language_confirmed, true);
 });
