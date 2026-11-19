@@ -6,16 +6,18 @@ from app.analyzers.language_analyzer import literal_assignments, literal_strings
 SEVERITY_VALUES = {"critical", "error", "warning", "info"}
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"""(?ix)
-    \b(?P<name>
-        api[_-]?key|api[_-]?secret|aws[_-]?access[_-]?key(?:[_-]?id)?|
-        client[_-]?secret|private[_-]?key|password|passwd|pwd|
-        auth(?:entication)?[_-]?token|access[_-]?token|
-        token|secret(?:[_-]?key)?
-    )\b
+    (?<![A-Z0-9])(?P<name>
+        api[_-]?(?:key|secret)|aws[_-]?access[_-]?key(?:[_-]?id)?|
+        client[_-]?secret|private[_-]?key|password|passwd|pwd|passphrase|
+        auth(?:entication)?[_-]?(?:token|key)|access[_-]?token|
+        refresh[_-]?token|bearer[_-]?token|authorization|
+        secret(?:[_-]?key)?|token|key
+    )
+    (?=\s*[:=])
     \s*[:=]\s*
     (?:
         (?P<quote>["'])(?P<quoted>[^"'\r\n]+)["']|
-        (?P<bare>[A-Z0-9_./+=-]{8,})
+        (?P<bare>[A-Z0-9_./+=:@%-]{8,})
     )
     """
 )
@@ -26,9 +28,27 @@ _PLACEHOLDER = re.compile(
 )
 _AWS_ACCESS_KEY = re.compile(r"(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])")
 _PRIVATE_KEY_HEADER = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")
+_URL_CREDENTIALS = re.compile(
+    r"(?i)(?P<scheme>[a-z][a-z0-9+.-]*://)[^/\s?#@]+@"
+)
+_BEARER_TOKEN = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/-]+=*)")
+_COMMON_API_TOKEN = re.compile(
+    r"(?i)(?<![A-Z0-9])"
+    r"(?:"
+    r"gsk_[A-Z0-9_-]{12,}|"
+    r"sk_(?:live|test)_[A-Z0-9_-]{8,}|"
+    r"sk-[A-Z0-9_-]{20,}|"
+    r"gh[pousr]_[A-Z0-9]{20,}|"
+    r"github_pat_[A-Z0-9_]{20,}|"
+    r"xox[baprs]-[A-Z0-9-]{10,}|"
+    r"AIza[A-Z0-9_-]{30,}|"
+    r"ya29\.[A-Z0-9_-]{20,}"
+    r")(?![A-Z0-9])"
+)
 _DATABASE_URL_ASSIGNMENT = re.compile(
     r"""(?ix)
-    \b(?:db[_-]?url|database[_-]?url|connection[_-]?string|dsn)
+    (?<![A-Z0-9])(?:db[_-]?url|database[_-]?url|connection[_-]?string|dsn)
+    (?=\s*[:=])
     \s*[:=]\s*["'](?P<value>[^"'\r\n]+)["']
     """
 )
@@ -81,6 +101,13 @@ def redact_credential_values(code: str) -> str:
         return match.group(0).replace(value, "********", 1)
 
     redacted = _CREDENTIAL_ASSIGNMENT.sub(replace, code)
+    redacted = _DATABASE_URL_ASSIGNMENT.sub(
+        lambda match: match.group(0).replace(match.group("value"), "********", 1),
+        redacted,
+    )
+    redacted = _URL_CREDENTIALS.sub(r"\g<scheme>********@", redacted)
+    redacted = _BEARER_TOKEN.sub(r"\1********", redacted)
+    redacted = _COMMON_API_TOKEN.sub("********", redacted)
     redacted = _AWS_ACCESS_KEY.sub("********", redacted)
     return re.sub(
         r"-----BEGIN ((?:RSA |EC |OPENSSH )?PRIVATE KEY)-----.*?-----END \1-----",

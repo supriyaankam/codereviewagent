@@ -39,6 +39,33 @@ class TeamStandardAnalyzerTests(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertEqual(redact_credential_values(code), code)
 
+    def test_redacts_prefixed_keys_passwords_database_urls_and_bearer_tokens(self):
+        values = [
+            "gsk_synthetic_secret_123456789",
+            "api_key_secret_value_12345",
+            "secret_key_value_12345",
+            "db-password-synthetic",
+            "db-user-synthetic",
+            "eyJ.synthetic.bearer.token",
+            "refresh-token-synthetic",
+        ]
+        text = "\n".join([
+            'GROQ_API_KEY="gsk_synthetic_secret_123456789"',
+            'API_KEY="api_key_secret_value_12345"',
+            'SECRET_KEY="secret_key_value_12345"',
+            'DATABASE_URL="postgresql://db-user-synthetic:db-password-synthetic@db.example/app"',
+            "Authorization: Bearer eyJ.synthetic.bearer.token",
+            "refresh_token=refresh-token-synthetic",
+            "https://url-user-synthetic:url-password-synthetic@example.test/path",
+        ])
+
+        redacted = redact_credential_values(text)
+
+        for value in [*values, "url-user-synthetic", "url-password-synthetic"]:
+            self.assertNotIn(value, redacted)
+        self.assertIn("GROQ_API_KEY", redacted)
+        self.assertIn("Bearer ********", redacted)
+
     def test_fake_api_key_is_detected_without_returning_the_value(self):
         secret = "sk_live_FAKE_KEY_1234567890"
         code = f'const apiKey = "{secret}";\n'
