@@ -1,4 +1,4 @@
-import { apiUrl } from './api';
+import { apiUrl } from './api.js';
 
 export async function fetchDashboard(currentUser) {
   if (!currentUser) throw new Error('Sign in to load your dashboard.');

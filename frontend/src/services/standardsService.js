@@ -4,7 +4,7 @@
  * so the backend is the single source of truth for standards.
  */
 
-import { apiUrl } from './api';
+import { apiUrl } from './api.js';
 
 const BASE = '/api/standards';
 

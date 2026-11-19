@@ -1,4 +1,4 @@
-import { apiUrl } from './api';
+import { apiUrl } from './api.js';
 
 export async function submitReview(body, currentUser) {
   if (!currentUser) throw new Error('Sign in before submitting code for review.');
