@@ -1,8 +1,10 @@
+import { apiUrl } from './api';
+
 export async function submitReview(body, currentUser) {
   if (!currentUser) throw new Error('Sign in before submitting code for review.');
 
   const token = await currentUser.getIdToken();
-  const response = await fetch('/api/review', {
+  const response = await fetch(apiUrl('/api/review'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -26,7 +28,7 @@ async function authenticatedReviewRequest(path, currentUser, options = {}) {
   if (!currentUser) throw new Error('Sign in to access saved reviews.');
 
   const token = await currentUser.getIdToken();
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     ...options,
     headers: {
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),

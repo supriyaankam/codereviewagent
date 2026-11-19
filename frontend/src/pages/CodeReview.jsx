@@ -16,6 +16,7 @@ import {
   findingIdentity,
   getReviewPageMode,
 } from '../utils/reviewPageState';
+import { apiUrl } from '../services/api';
 import '../styles/CodeReview.css';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -110,7 +111,7 @@ function IssueFeedbackPanel({
       };
 
       const token = await currentUser.getIdToken();
-      const res = await fetch('/api/feedback', {
+      const res = await fetch(apiUrl('/api/feedback'), {
         method:  'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -285,7 +286,7 @@ function IssueFixSuggestion({
     try {
       if (!currentUser) throw new Error('Sign in before requesting an AI fix.');
       const token = await currentUser.getIdToken();
-      const response = await fetch('/api/reviews/fix', {
+      const response = await fetch(apiUrl('/api/reviews/fix'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -967,7 +968,7 @@ function FixPanel({
     try {
       if (!currentUser) throw new Error('Sign in before requesting an AI fix.');
       const token = await currentUser.getIdToken();
-      const res = await fetch('/api/reviews/fix', {
+      const res = await fetch(apiUrl('/api/reviews/fix'), {
         method:  'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { getReviewDetailPath, getSavedIssueCount } from '../services/reviewService';
+import { apiUrl } from '../services/api';
 
 const RISK_COLOR = {
   critical: 'danger',
@@ -25,7 +26,7 @@ export default function ReviewHistory() {
     try {
       const token = await currentUser.getIdToken();
       const res = await fetch(
-        `/api/reviews?user_id=${encodeURIComponent(currentUser.uid)}`,
+        apiUrl(`/api/reviews?user_id=${encodeURIComponent(currentUser.uid)}`),
         { headers: { Authorization: `Bearer ${token}` } },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

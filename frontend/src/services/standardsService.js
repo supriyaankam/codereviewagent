@@ -4,6 +4,8 @@
  * so the backend is the single source of truth for standards.
  */
 
+import { apiUrl } from './api';
+
 const BASE = '/api/standards';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -12,7 +14,7 @@ async function request(url, options = {}, currentUser) {
   if (!currentUser) throw new Error('Sign in to access team standards.');
   const token = await currentUser.getIdToken();
   const { headers: optionHeaders = {}, ...requestOptions } = options;
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl(url), {
     ...requestOptions,
     headers: {
       'Content-Type': 'application/json',

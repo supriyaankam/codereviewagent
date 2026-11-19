@@ -3,6 +3,7 @@ import PropTypes from 'prop-types';
 import { useAuth } from '../context/AuthContext';
 import CodeComparison from '../components/CodeComparison';
 import { buildAnalysisBatches } from '../utils/analysisBatches';
+import { apiUrl } from '../services/api';
 import '../styles/AutoFix.css';
 import '../styles/CodeReview.css';
 
@@ -626,7 +627,7 @@ export default function AutoFix() {
       const fd = new FormData();
       fd.append('file', file);
       fd.append('download', 'false');
-      const res = await fetch('/api/fix/upload', {
+      const res = await fetch(apiUrl('/api/fix/upload'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: fd,
@@ -666,7 +667,7 @@ export default function AutoFix() {
       const headers = { Authorization: `Bearer ${token}` };
       let status = null;
       if (activeUploadId) {
-        const statusResponse = await fetch(`/api/fix/project-uploads/${activeUploadId}`, { headers });
+        const statusResponse = await fetch(apiUrl(`/api/fix/project-uploads/${activeUploadId}`), { headers });
         if (statusResponse.ok) {
           status = await statusResponse.json();
           const serverManifest = status.files
@@ -684,7 +685,7 @@ export default function AutoFix() {
       }
       if (!activeUploadId) {
         setUploadStatus('Starting secure upload…');
-        const createResponse = await fetch('/api/fix/project-uploads', {
+        const createResponse = await fetch(apiUrl('/api/fix/project-uploads'), {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -733,7 +734,7 @@ export default function AutoFix() {
           const digest = await crypto.subtle.digest('SHA-256', buffer);
           const checksum = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
           const chunkResponse = await fetch(
-            `/api/fix/project-uploads/${activeUploadId}/files/${fileStatus.index}/chunks/${chunkIndex}`,
+            apiUrl(`/api/fix/project-uploads/${activeUploadId}/files/${fileStatus.index}/chunks/${chunkIndex}`),
             {
               method: 'PUT',
               headers: { ...headers, 'X-Chunk-SHA256': checksum },
@@ -747,12 +748,12 @@ export default function AutoFix() {
       }
 
       setUploadStatus('Finalizing project…');
-      const completeResponse = await fetch(`/api/fix/project-uploads/${activeUploadId}/complete`, {
+      const completeResponse = await fetch(apiUrl(`/api/fix/project-uploads/${activeUploadId}/complete`), {
         method: 'POST',
         headers,
       });
       if (!completeResponse.ok) throw new Error(await responseError(completeResponse));
-      const filesResponse = await fetch(`/api/fix/project-uploads/${activeUploadId}/files`, { headers });
+      const filesResponse = await fetch(apiUrl(`/api/fix/project-uploads/${activeUploadId}/files`), { headers });
       if (!filesResponse.ok) throw new Error(await responseError(filesResponse));
       const project = await filesResponse.json();
       setProjectFiles(project.files);
@@ -792,7 +793,7 @@ export default function AutoFix() {
       const token = await currentUser.getIdToken();
       const formData = new FormData();
       formData.append('file', file);
-      const response = await fetch('/api/fix/project-uploads/archive', {
+      const response = await fetch(apiUrl('/api/fix/project-uploads/archive'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
@@ -852,7 +853,7 @@ export default function AutoFix() {
       for (let batchIndex = 0; batchIndex < totalBatches; batchIndex += 1) {
         const batch = batches[batchIndex];
         setUploadStatus(`Analyzing request ${batchIndex + 1} of ${totalBatches} (${batch.length} files)…`);
-        const response = await fetch(`/api/fix/project-uploads/${uploadId}/analyze`, {
+        const response = await fetch(apiUrl(`/api/fix/project-uploads/${uploadId}/analyze`), {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -908,7 +909,7 @@ export default function AutoFix() {
     setUploadStatus('Calculating project quality score…');
     try {
       const token = await currentUser.getIdToken();
-      const response = await fetch(`/api/fix/project-uploads/${uploadId}/quality-score`, {
+      const response = await fetch(apiUrl(`/api/fix/project-uploads/${uploadId}/quality-score`), {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) throw new Error(await responseError(response));
@@ -936,7 +937,7 @@ export default function AutoFix() {
     setUploadStatus('Generating and validating a fix proposal…');
     try {
       const token = await currentUser.getIdToken();
-      const response = await fetch(`/api/fix/project-uploads/${uploadId}/fix-suggestions`, {
+      const response = await fetch(apiUrl(`/api/fix/project-uploads/${uploadId}/fix-suggestions`), {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -973,7 +974,7 @@ export default function AutoFix() {
     try {
       const token = await currentUser.getIdToken();
       const response = await fetch(
-        `/api/fix/project-uploads/${uploadId}/fix-suggestions/${proposal.proposal_id}/apply`,
+        apiUrl(`/api/fix/project-uploads/${uploadId}/fix-suggestions/${proposal.proposal_id}/apply`),
         {
           method: 'POST',
           headers: {
@@ -1041,7 +1042,7 @@ export default function AutoFix() {
     try {
       const token = await currentUser.getIdToken();
       const response = await fetch(
-        `/api/fix/project-uploads/${uploadId}/restore/${lastBackup.backupId}`,
+        apiUrl(`/api/fix/project-uploads/${uploadId}/restore/${lastBackup.backupId}`),
         { method: 'POST', headers: { Authorization: `Bearer ${token}` } },
       );
       if (!response.ok) throw new Error(await responseError(response));
@@ -1072,7 +1073,7 @@ export default function AutoFix() {
       if (!currentUser) throw new Error('Sign in with Firebase before submitting code for fixes.');
       const token = await currentUser.getIdToken();
       const langSlug = manualLang.toLowerCase().replace('#', 'sharp').replace('+', 'p');
-      const res = await fetch('/api/fix/code', {
+      const res = await fetch(apiUrl('/api/fix/code'), {
         method:  'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1128,7 +1129,7 @@ export default function AutoFix() {
       const fd = new FormData();
       fd.append('file', file);
       fd.append('download', 'true');
-      const res = await fetch('/api/fix/upload', {
+      const res = await fetch(apiUrl('/api/fix/upload'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: fd,
