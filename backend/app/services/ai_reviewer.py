@@ -326,8 +326,9 @@ def run_ai_review(
                 )
             except _InvalidAIResponse as exc:
                 logger.warning(
-                    "[groq] invalid response  reason=%s  chars=%d  attempt=%d",
+                    "[groq] invalid response  reason=%s  finish_reason=%s  chars=%d  attempt=%d",
                     exc.reason,
+                    finish_reason,
                     len(raw),
                     attempt,
                 )
@@ -428,11 +429,13 @@ def _decode_json_object(raw: str) -> dict[str, Any]:
         raise _InvalidAIResponse("empty")
 
     decoder = json.JSONDecoder()
-    candidates = [raw.strip()]
-    lines = raw.strip().splitlines()
-    if lines and lines[0].strip().startswith("```"):
-        if lines[-1].strip().startswith("```") and len(lines) > 2:
-            candidates.insert(0, "\n".join(lines[1:-1]).strip())
+    stripped = raw.strip().lstrip("\ufeff")
+    candidates = [stripped]
+
+    # Groq may ignore strict JSON mode and return a Markdown code fence or place
+    # prose around the object. Extract fence contents and surrounding JSON safely.
+    for match in re.finditer(r"```(?:json|JSON)?\s*([\s\S]*?)```", stripped):
+        candidates.append(match.group(1).strip())
 
     for candidate in candidates:
         try:

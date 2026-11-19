@@ -77,12 +77,43 @@ class AIReviewerResponseTests(unittest.TestCase):
         client.chat.completions.create.assert_called_once()
 
     def test_markdown_wrapped_json_is_accepted(self):
-        response = f"```json\n{json.dumps(self.valid_payload)}\n```"
+        response = f"Here is the review:\n```json\n{json.dumps(self.valid_payload)}\n```\nEnd."
         result, client = self._run([response])
 
         self.assertTrue(result["ai_available"])
         self.assertEqual(result["issues"][0]["line"], 4)
         client.chat.completions.create.assert_called_once()
+
+    def test_schema_invalid_responses_retry_then_fall_back(self):
+        invalid_payload = {
+            **self.valid_payload,
+            "issues": [{
+                **self.valid_payload["issues"][0],
+                "line": "four",
+            }],
+        }
+        client = Mock()
+        client.chat.completions.create.side_effect = [
+            _completion(json.dumps(invalid_payload)),
+            _completion(json.dumps(invalid_payload)),
+        ]
+        with patch("app.services.ai_reviewer._get_client", return_value=client):
+            with self.assertLogs("app.services.ai_reviewer", level="WARNING") as logs:
+                result = run_ai_review(
+                    code="value = 1\nsecond = 2\nthird = 3\ncall(value)\n",
+                    language="python",
+                    project_name="test-project",
+                    static_issues=[],
+                )
+
+        self.assertFalse(result["ai_available"])
+        self.assertEqual(result["issues"], [])
+        self.assertEqual(result["failure_category"], "response_schema")
+        self.assertIn("invalid response after retry", result["fallback_reason"])
+        self.assertEqual(client.chat.completions.create.call_count, 2)
+        diagnostic_log = "\n".join(logs.output)
+        self.assertIn("reason=schema", diagnostic_log)
+        self.assertIn("finish_reason=stop", diagnostic_log)
 
     def test_json_surrounded_by_explanatory_text_is_accepted(self):
         response = f"Review result:\n{json.dumps(self.valid_payload)}\nEnd of response."
