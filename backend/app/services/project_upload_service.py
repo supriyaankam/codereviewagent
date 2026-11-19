@@ -1101,11 +1101,28 @@ def project_quality_score(upload_id: str, owner_id: str) -> dict[str, Any]:
         "failed": len(analysis_state.get("errors", [])),
         "skipped": len(analysis_state.get("skipped_files", [])),
     }
-    persisted = project_cloud_service.record_quality_score(upload_id, score)
+    persisted = project_cloud_service.record_quality_score(
+        upload_id,
+        score,
+        analysis_state.get("run_id"),
+    )
     return {
         **score,
         "history_persisted": persisted,
     }
+
+
+def source_files_available(upload_id: str, owner_id: str) -> bool:
+    try:
+        session_dir, manifest = _session_for_user(upload_id, owner_id)
+    except ProjectUploadError as exc:
+        if exc.status_code in (404, 410):
+            return False
+        raise
+    return all(
+        _file_is_complete(session_dir, index, file_info)
+        for index, file_info in enumerate(manifest.get("files", []))
+    )
 
 
 def create_fix_suggestion(

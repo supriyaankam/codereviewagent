@@ -8,6 +8,7 @@ const navItems = [
   { to: '/review',    label: 'Code Review',    icon: 'bi-code-slash'     },
   { to: '/autofix',   label: 'Auto-Fix',       icon: 'bi-magic'          },
   { to: '/history',   label: 'Review History', icon: 'bi-clock-history'  },
+  { to: '/project-history', label: 'Project History', icon: 'bi-folder2-open' },
   { to: '/standards', label: 'Team Standards', icon: 'bi-shield-check'   },
 ];
 

@@ -1,9 +1,10 @@
-const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/+$/, '');
+const viteEnv = import.meta.env || {};
+const configuredBaseUrl = viteEnv.VITE_API_BASE_URL?.trim().replace(/\/+$/, '');
 
 export function apiUrl(path) {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
 
-  if (!import.meta.env.PROD || !configuredBaseUrl) {
+  if (!viteEnv.PROD || !configuredBaseUrl) {
     return normalizedPath;
   }
 
