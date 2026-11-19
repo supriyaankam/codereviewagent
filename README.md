@@ -189,10 +189,47 @@ backend/firebase/serviceAccountKey.json
 Create a Cloud Storage bucket in the Firebase Console and set
 `FIREBASE_STORAGE_BUCKET` to the exact bucket name shown under **Storage**. The
 backend writes project files to Cloud Storage using its Admin SDK credentials;
-project metadata, analysis summaries/findings, and scores are stored in
-Firestore. Source archives are not stored in Firestore. If the bucket setting
-is missing, project upload remains local to backend temporary storage and is
-not durable across server cleanup or replacement.
+project metadata, analysis run counts, structured finding metadata, and scores
+are stored in Firestore. AI-generated explanations and code examples are not
+retained in Project History. Source archives are not stored in Firestore. If
+the bucket setting is missing, project upload remains local to backend
+temporary storage and is not durable across server cleanup or replacement.
+
+Authenticated users can open **Project History** from the app navigation to
+browse uploaded projects, reopen saved analysis runs, and review their findings
+and quality scores. Firestore retains the analysis history, but source code is
+not copied into Firestore; durable source-file retention requires a configured
+Cloud Storage bucket. The history view intentionally shows structured finding
+metadata rather than the original AI-generated prose or code examples.
+
+To inspect legacy Project History documents, run this from the `backend`
+directory:
+
+```powershell
+python -m scripts.cleanup_project_history
+```
+
+This is a dry run. It reports per-collection scan/change counts and field-level
+removal, normalization, and addition counts without printing field values,
+document IDs, or source content. Review it before explicitly applying the
+allowlist cleanup with `python -m scripts.cleanup_project_history --apply`.
+The migration only processes top-level project documents with the existing
+non-negative integer `file_count` upload marker. Ordinary user-created projects
+and all of their subcollections are skipped. Documents missing or containing an
+invalid `file_count` are classified as ambiguous when upload-only metadata is
+present (such as `storage_backend`, `archive_storage_path`, analysis linkage, or
+an upload status); these records and their subcollections are also skipped.
+The report separately counts eligible history uploads, ordinary projects, and
+ambiguous/partial records. It rewrites only matching upload records and their
+history subcollections with safe structured fields; it does not delete records.
+Before applying cleanup, put the application in maintenance/read-only mode and
+stop or drain every backend instance handling Project History uploads,
+completion, analysis, or scoring. Keep writes paused through the apply run and a
+post-cleanup dry run. Each changed document is re-read and replaced in a
+Firestore transaction. A document changed since the migration scan, or
+concurrently before transaction commit, is skipped and counted as a conflict.
+Other write errors stop the migration, but earlier per-document writes are not
+rolled back.
 
 Deploy the included owner-scoped rules after selecting your Firebase project:
 
