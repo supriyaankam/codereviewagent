@@ -16,6 +16,7 @@ Fallback:
 
 from __future__ import annotations
 
+from email.utils import parsedate_to_datetime
 import json
 import logging
 import os
@@ -56,6 +57,15 @@ _CATEGORY_ALIASES = {
 }
 _EXPLANATION_ALIASES = ("description",)
 _RECOMMENDATION_ALIASES = ("suggested_fix", "fix")
+_RATE_LIMIT_HEADERS = (
+    "retry-after",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-remaining-tokens",
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset-tokens",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+)
 _NON_SYMBOL_REFERENCES = {
     "a", "an", "and", "are", "as", "be", "by", "can", "class", "code", "does",
     "for", "from", "function", "if", "in", "input", "is", "it", "line", "may",
@@ -163,6 +173,68 @@ def _get_client() -> Groq | None:
     # Never log the actual key value
     logger.info("[groq] API key configured")
     return Groq(api_key=api_key)
+
+
+def _rate_limit_diagnostics(exc: RateLimitError) -> tuple[Any, str, str, dict[str, str]]:
+    body = exc.body if isinstance(exc.body, dict) else {}
+    error_body = body.get("error", body)
+    if not isinstance(error_body, dict):
+        error_body = {}
+
+    code = error_body.get("code")
+    if not isinstance(code, str) or not re.fullmatch(r"rate_limit_[a-z0-9_]{1,60}", code.lower()):
+        code = None
+    else:
+        code = code.lower()
+
+    message = error_body.get("message")
+    normalized_message = message.lower() if isinstance(message, str) else ""
+    quota_patterns = (
+        (("requests per minute", "request per minute", "rpm"), "RPM"),
+        (("requests per day", "request per day", "rpd"), "RPD"),
+        (("tokens per minute", "token per minute", "tpm"), "TPM"),
+        (("tokens per day", "token per day", "tpd"), "TPD"),
+    )
+    quota = next(
+        (
+            label
+            for phrases, label in quota_patterns
+            if any(phrase in normalized_message for phrase in phrases)
+        ),
+        "unspecified",
+    )
+    provider_error = f"code:{code}" if code else (
+        f"message:rate limit ({quota})" if quota != "unspecified" else "unavailable"
+    )
+
+    response = getattr(exc, "response", None)
+    response_headers = getattr(response, "headers", {})
+    safe_headers = {}
+    for name in _RATE_LIMIT_HEADERS:
+        value = response_headers.get(name) if response_headers else None
+        if not isinstance(value, str) or len(value) > 80:
+            continue
+        value = value.strip()
+        if name.startswith("x-ratelimit-remaining"):
+            if re.fullmatch(r"\d+", value):
+                safe_headers[name] = value
+            continue
+        if (
+            re.fullmatch(r"\d+(?:\.\d+)?", value)
+            or re.fullmatch(r"(?:\d+(?:\.\d+)?[hms])+", value, re.IGNORECASE)
+        ):
+            safe_headers[name] = value
+            continue
+        if name == "retry-after":
+            try:
+                date_value = parsedate_to_datetime(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if date_value is None:
+                continue
+            safe_headers[name] = date_value.isoformat()
+
+    return getattr(exc, "status_code", None), provider_error, quota, safe_headers
 
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
@@ -393,8 +465,15 @@ def run_ai_review(
             static_issues,
             "authentication",
         )
-    except RateLimitError:
-        logger.error("[groq] rate limit exceeded")
+    except RateLimitError as exc:
+        status_code, provider_error, quota, headers = _rate_limit_diagnostics(exc)
+        logger.error(
+            "[groq] rate limit exceeded  status=%s  provider_error=%s  quota=%s  headers=%s",
+            status_code,
+            provider_error,
+            quota,
+            headers,
+        )
         return _fallback(
             "Groq rate limit reached. Please try again in a moment.",
             static_issues,

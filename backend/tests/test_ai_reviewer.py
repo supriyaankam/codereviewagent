@@ -4,6 +4,9 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import httpx
+from groq import RateLimitError
+
 from app.services.ai_reviewer import (
     _ALLOWED_SOURCES,
     _SYSTEM_PROMPT,
@@ -517,6 +520,91 @@ class AIReviewerResponseTests(unittest.TestCase):
         retry_prompt = client.chat.completions.create.call_args_list[1].kwargs["messages"][1]["content"]
         self.assertIn("issues[0].line", retry_prompt)
         self.assertNotIn(response_sentinel, retry_prompt)
+
+    def test_rate_limit_logs_safe_provider_details_and_selected_headers(self):
+        source_sentinel = "source_code_must_not_be_logged"
+        credential_sentinel = "api_key_must_not_be_logged"
+        response_sentinel = "full_response_must_not_be_logged"
+        cases = (
+            (
+                "requests per minute (RPM)",
+                "RPM",
+                "rate_limit_exceeded",
+                "code:rate_limit_exceeded",
+            ),
+            (
+                "requests per day (RPD)",
+                "RPD",
+                credential_sentinel,
+                "message:rate limit (RPD)",
+            ),
+            ("tokens per minute (TPM)", "TPM", None, "message:rate limit (TPM)"),
+            ("tokens per day (TPD)", "TPD", None, "message:rate limit (TPD)"),
+        )
+
+        for phrase, quota, code, expected_provider_error in cases:
+            with self.subTest(quota=quota):
+                body = {
+                    "error": {
+                        "message": (
+                            f"Rate limit reached for {phrase}. "
+                            f"{source_sentinel} {credential_sentinel} {response_sentinel}"
+                        ),
+                    },
+                }
+                if code:
+                    body["error"]["code"] = code
+                headers = {
+                    "retry-after": "30",
+                    "x-ratelimit-remaining-requests": "0",
+                    "x-ratelimit-remaining-tokens": "1234",
+                    "x-ratelimit-reset-requests": "28s",
+                    "x-ratelimit-reset-tokens": "1m2.5s",
+                    "x-ratelimit-remaining": "0",
+                    "x-ratelimit-reset": credential_sentinel,
+                    "authorization": credential_sentinel,
+                }
+                response = httpx.Response(
+                    429,
+                    headers=headers,
+                    request=httpx.Request("POST", "https://api.groq.com"),
+                    json=body,
+                )
+                error = RateLimitError(
+                    "rate limited",
+                    response=response,
+                    body=body,
+                )
+                client = Mock()
+                client.chat.completions.create.side_effect = error
+                with patch("app.services.ai_reviewer._get_client", return_value=client):
+                    with self.assertLogs("app.services.ai_reviewer", level="ERROR") as logs:
+                        result = run_ai_review(
+                            code=f"{source_sentinel} = 1",
+                            language="python",
+                            project_name="test-project",
+                            static_issues=[],
+                        )
+
+                diagnostic_log = "\n".join(logs.output)
+                self.assertIn("status=429", diagnostic_log)
+                self.assertIn(f"quota={quota}", diagnostic_log)
+                self.assertIn("retry-after': '30'", diagnostic_log)
+                self.assertIn("x-ratelimit-remaining-requests': '0'", diagnostic_log)
+                self.assertIn("x-ratelimit-remaining-tokens': '1234'", diagnostic_log)
+                self.assertIn("x-ratelimit-reset-requests': '28s'", diagnostic_log)
+                self.assertIn("x-ratelimit-reset-tokens': '1m2.5s'", diagnostic_log)
+                self.assertIn(
+                    f"provider_error={expected_provider_error}",
+                    diagnostic_log,
+                )
+                self.assertNotIn(source_sentinel, diagnostic_log)
+                self.assertNotIn(credential_sentinel, diagnostic_log)
+                self.assertNotIn(response_sentinel, diagnostic_log)
+                self.assertNotIn("authorization", diagnostic_log)
+                self.assertFalse(result["ai_available"])
+                self.assertEqual(result["failure_category"], "rate_limited")
+                client.chat.completions.create.assert_called_once()
 
     def test_findings_with_nonexistent_symbols_are_rejected_after_retry(self):
         invalid_payload = {
