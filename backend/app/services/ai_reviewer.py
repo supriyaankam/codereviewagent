@@ -40,9 +40,22 @@ _ALLOWED_CATEGORIES = (
     "security", "quality", "naming", "unused", "complexity", "syntax", "style",
 )
 _ALLOWED_SOURCES = (
-    "ast", "pylint", "bandit", "secrets", "syntax", "tree_sitter", "team_standard", "ai",
+    "ast", "pylint", "bandit", "secrets", "syntax", "tree_sitter", "team_standard", "static", "ai",
 )
 _ALLOWED_CONFIDENCE = ("high", "medium", "low")
+_SEVERITY_ALIASES = {
+    "high": "error",
+    "medium": "warning",
+    "low": "warning",
+}
+_CATEGORY_ALIASES = {
+    "general": "quality",
+    "error-handling": "quality",
+    "architecture": "quality",
+    "performance": "quality",
+}
+_EXPLANATION_ALIASES = ("description",)
+_RECOMMENDATION_ALIASES = ("suggested_fix", "fix")
 _NON_SYMBOL_REFERENCES = {
     "a", "an", "and", "are", "as", "be", "by", "can", "class", "code", "does",
     "for", "from", "function", "if", "in", "input", "is", "it", "line", "may",
@@ -53,9 +66,16 @@ _NON_SYMBOL_REFERENCES = {
 
 
 class _InvalidAIResponse(ValueError):
-    def __init__(self, reason: str):
+    def __init__(
+        self,
+        reason: str,
+        field: str | None = None,
+        detail: str | None = None,
+    ):
         super().__init__(reason)
         self.reason = reason
+        self.field = field
+        self.detail = detail
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
@@ -78,7 +98,10 @@ RULES:
    Do NOT return overall_risk="info" when static issues exist.
 8. For syntax errors: explain them in plain English and show the exact line and column.
 9. The "source" field must reflect where the issue originated:
-   ast | pylint | bandit | secrets | syntax | tree_sitter | team_standard | ai
+   ast | pylint | bandit | secrets | syntax | tree_sitter | team_standard | static | ai
+   Use exactly one of these values, in lowercase.
+10. Use exactly one listed issue category. Map team-standard categories
+    general, error-handling, architecture, and performance to quality.
 
 SEVERITY GUIDELINES — use these carefully:
 - "critical": security vulnerabilities, syntax errors, code that will crash at runtime
@@ -114,7 +137,7 @@ OUTPUT SCHEMA (strict — no extra keys, no markdown):
       "explanation":    "<plain-English explanation of why this is a problem>",
       "recommendation": "<concrete fix, ideally with a short code example>",
       "line":           <integer, 0 if not line-specific>,
-      "source":         "<ast|pylint|bandit|secrets|syntax|ai>",
+      "source":         "<ast|pylint|bandit|secrets|syntax|tree_sitter|team_standard|static|ai>",
       "confidence":     "high|medium|low",
       "beginner_explanation": {
         "problem": "<what is happening in simple English>",
@@ -326,8 +349,11 @@ def run_ai_review(
                 )
             except _InvalidAIResponse as exc:
                 logger.warning(
-                    "[groq] invalid response  reason=%s  finish_reason=%s  chars=%d  attempt=%d",
+                    "[groq] invalid response  reason=%s  field=%s  detail=%s  "
+                    "finish_reason=%s  chars=%d  attempt=%d",
                     exc.reason,
+                    exc.field or "-",
+                    exc.detail or "-",
                     finish_reason,
                     len(raw),
                     attempt,
@@ -337,6 +363,8 @@ def run_ai_review(
                         "The previous response was truncated. Keep the summary under 2 sentences, "
                         "make each issue concise, and omit optional beginner_explanation fields."
                         if exc.reason == "truncated"
+                        else _schema_retry_guidance(exc)
+                        if exc.reason == "schema"
                         else "Your previous response did not conform to the required JSON schema. "
                         "Return one complete JSON object only. Ensure `overall_risk` and `summary` "
                         "are strings and `issues` is an array of fully valid issue objects."
@@ -459,11 +487,66 @@ def _decode_json_object(raw: str) -> dict[str, Any]:
     raise _InvalidAIResponse("json")
 
 
-def _required_string(record: dict, field: str, max_length: int) -> str:
-    value = record.get(field)
-    if not isinstance(value, str) or not value.strip():
-        raise _InvalidAIResponse("schema")
+def _normalize_enum(
+    value: Any,
+    field: str,
+    allowed: tuple[str, ...],
+    aliases: dict[str, str] | None = None,
+) -> str:
+    if not isinstance(value, str):
+        raise _InvalidAIResponse("schema", field, "type")
+    normalized = value.strip().lower()
+    if not normalized:
+        raise _InvalidAIResponse("schema", field, "empty")
+    normalized = (aliases or {}).get(normalized, normalized)
+    if normalized not in allowed:
+        raise _InvalidAIResponse("schema", field, "unsupported_value")
+    return normalized
+
+
+def _required_string(
+    record: dict,
+    field: str,
+    max_length: int,
+    aliases: tuple[str, ...] = (),
+    field_path: str | None = None,
+) -> str:
+    if field in record:
+        value = record[field]
+    else:
+        alias = next((name for name in aliases if name in record), None)
+        if alias is None:
+            raise _InvalidAIResponse("schema", field_path or field, "missing")
+        value = record[alias]
+    if not isinstance(value, str):
+        raise _InvalidAIResponse("schema", field_path or field, "type")
+    if not value.strip():
+        raise _InvalidAIResponse("schema", field_path or field, "empty")
     return value.strip()[:max_length]
+
+
+def _schema_retry_guidance(error: _InvalidAIResponse) -> str:
+    expected = {
+        "overall_risk": "one of critical, high, medium, low, or info",
+        "summary": "a non-empty string",
+        "issues": "an array",
+        "severity": "one of critical, error, warning, or info (high/medium/low are accepted aliases)",
+        "category": "one of security, quality, naming, unused, complexity, syntax, or style",
+        "line": "a non-negative integer",
+        "source": "one of ast, pylint, bandit, secrets, syntax, tree_sitter, team_standard, static, or ai",
+        "confidence": "high, medium, or low",
+        "beginner_explanation": "an object of string fields, or null",
+        "title": "a non-empty string",
+        "explanation": "a non-empty string (or use description)",
+        "recommendation": "a non-empty string (or use suggested_fix or fix)",
+    }
+    field_name = (error.field or "").rsplit(".", 1)[-1]
+    requirement = expected.get(field_name, "the required type and value")
+    return (
+        f"The previous JSON had an invalid field `{error.field or 'unknown'}` "
+        f"({error.detail or 'invalid'}). Correct that field: it must be {requirement}. "
+        "Do not include the rejected value; return one complete JSON object."
+    )
 
 
 def _parse_response(
@@ -477,43 +560,79 @@ def _parse_response(
     risk = data.get("overall_risk")
     summary = data.get("summary")
     raw_issues = data.get("issues")
-    if risk not in RISK_LEVELS or not isinstance(summary, str) or not summary.strip():
-        raise _InvalidAIResponse("schema")
+    risk = _normalize_enum(risk, "overall_risk", RISK_LEVELS)
+    if not isinstance(summary, str):
+        raise _InvalidAIResponse("schema", "summary", "type")
+    if not summary.strip():
+        raise _InvalidAIResponse("schema", "summary", "empty")
     if not isinstance(raw_issues, list):
-        raise _InvalidAIResponse("schema")
+        raise _InvalidAIResponse("schema", "issues", "type")
 
     issues = []
-    for item in raw_issues:
+    for index, item in enumerate(raw_issues):
+        item_path = f"issues[{index}]"
         if not isinstance(item, dict):
-            raise _InvalidAIResponse("schema")
-        severity = item.get("severity")
-        category = item.get("category")
+            raise _InvalidAIResponse("schema", item_path, "type")
+        severity = _normalize_enum(
+            item.get("severity"),
+            f"{item_path}.severity",
+            ("critical", "error", "warning", "info"),
+            _SEVERITY_ALIASES,
+        )
+        category = _normalize_enum(
+            item.get("category"),
+            f"{item_path}.category",
+            _ALLOWED_CATEGORIES,
+            _CATEGORY_ALIASES,
+        )
         line = item.get("line")
-        if severity not in ("critical", "error", "warning", "info"):
-            raise _InvalidAIResponse("schema")
-        if category not in _ALLOWED_CATEGORIES:
-            raise _InvalidAIResponse("schema")
         if isinstance(line, bool) or not isinstance(line, int) or line < 0:
-            raise _InvalidAIResponse("schema")
-        source = item.get("source", "ai")
-        confidence = item.get("confidence", "medium")
-        beginner = item.get("beginner_explanation", {})
-        if source not in _ALLOWED_SOURCES or confidence not in _ALLOWED_CONFIDENCE:
-            raise _InvalidAIResponse("schema")
+            raise _InvalidAIResponse("schema", f"{item_path}.line", "type_or_range")
+        source = _normalize_enum(
+            item.get("source", "ai"),
+            f"{item_path}.source",
+            _ALLOWED_SOURCES,
+        )
+        confidence = _normalize_enum(
+            item.get("confidence", "medium"),
+            f"{item_path}.confidence",
+            _ALLOWED_CONFIDENCE,
+        )
+        beginner = item.get("beginner_explanation")
+        if beginner is None:
+            beginner = {}
         if not isinstance(beginner, dict):
-            raise _InvalidAIResponse("schema")
-        if any(
-            key in beginner and not isinstance(beginner[key], str)
-            for key in ("problem", "cause", "impact", "fix", "example", "concept")
-        ):
-            raise _InvalidAIResponse("schema")
+            raise _InvalidAIResponse(
+                "schema",
+                f"{item_path}.beginner_explanation",
+                "type",
+            )
+        for key in ("problem", "cause", "impact", "fix", "example", "concept"):
+            if key in beginner and not isinstance(beginner[key], str):
+                raise _InvalidAIResponse(
+                    "schema",
+                    f"{item_path}.beginner_explanation.{key}",
+                    "type",
+                )
 
         issues.append({
             "severity": severity,
             "category": category,
-            "title": _required_string(item, "title", 200),
-            "explanation": _required_string(item, "explanation", 1000),
-            "recommendation": _required_string(item, "recommendation", 1000),
+            "title": _required_string(item, "title", 200, field_path=f"{item_path}.title"),
+            "explanation": _required_string(
+                item,
+                "explanation",
+                1000,
+                aliases=_EXPLANATION_ALIASES,
+                field_path=f"{item_path}.explanation",
+            ),
+            "recommendation": _required_string(
+                item,
+                "recommendation",
+                1000,
+                aliases=_RECOMMENDATION_ALIASES,
+                field_path=f"{item_path}.recommendation",
+            ),
             "line": line,
             "source": source,
             "confidence": confidence,

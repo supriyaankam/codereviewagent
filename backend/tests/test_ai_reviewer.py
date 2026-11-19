@@ -1,9 +1,16 @@
 import json
 import unittest
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from app.services.ai_reviewer import run_ai_review
+from app.services.ai_reviewer import (
+    _ALLOWED_SOURCES,
+    _SYSTEM_PROMPT,
+    _InvalidAIResponse,
+    _parse_response,
+    run_ai_review,
+)
 
 
 def _completion(content, finish_reason="stop", model="openai/gpt-oss-120b"):
@@ -50,19 +57,27 @@ class AIReviewerResponseTests(unittest.TestCase):
             "source": "syntax",
         }
 
-    def _run(self, responses):
+    def _run(self, responses, static_issues=None, code=None):
         client = Mock()
         client.chat.completions.create.side_effect = [
             _completion(response) for response in responses
         ]
         with patch("app.services.ai_reviewer._get_client", return_value=client):
             result = run_ai_review(
-                code="value = 1\nsecond = 2\nthird = 3\ncall(value)\n",
+                code=code or "value = 1\nsecond = 2\nthird = 3\ncall(value)\n",
                 language="python",
                 project_name="test-project",
-                static_issues=[],
+                static_issues=static_issues or [],
             )
         return result, client
+
+    def _parse(self, payload):
+        return _parse_response(
+            json.dumps(payload),
+            [],
+            "value = 1\nsecond = 2\nthird = 3\ncall(value)\n",
+            "python",
+        )
 
     def test_valid_json_is_accepted_and_requests_json_mode(self):
         result, client = self._run([json.dumps(self.valid_payload)])
@@ -113,6 +128,8 @@ class AIReviewerResponseTests(unittest.TestCase):
         self.assertEqual(client.chat.completions.create.call_count, 2)
         diagnostic_log = "\n".join(logs.output)
         self.assertIn("reason=schema", diagnostic_log)
+        self.assertIn("field=issues[0].line", diagnostic_log)
+        self.assertIn("detail=type_or_range", diagnostic_log)
         self.assertIn("finish_reason=stop", diagnostic_log)
 
     def test_json_surrounded_by_explanatory_text_is_accepted(self):
@@ -230,6 +247,276 @@ class AIReviewerResponseTests(unittest.TestCase):
         self.assertTrue(result["ai_available"])
         self.assertEqual(result["issues"][0]["line"], 4)
         self.assertEqual(client.chat.completions.create.call_count, 2)
+
+    def test_explicit_enum_aliases_and_case_whitespace_are_normalized(self):
+        payload = deepcopy(self.valid_payload)
+        payload["overall_risk"] = " MEDIUM "
+        issue = payload["issues"][0]
+        issue["severity"] = " HIGH "
+        issue["category"] = " ERROR-HANDLING "
+        issue["source"] = " TEAM_STANDARD "
+        issue["confidence"] = " HIGH "
+        issue.pop("explanation")
+        issue["description"] = "The same operation is repeated."
+        issue.pop("recommendation")
+        issue["suggested_fix"] = "Extract a helper."
+        issue["beginner_explanation"] = None
+
+        result = self._parse(payload)
+
+        self.assertEqual(result["issues"][0]["severity"], "error")
+        self.assertEqual(result["issues"][0]["category"], "quality")
+        self.assertEqual(result["issues"][0]["source"], "ai")
+        self.assertEqual(result["issues"][0]["confidence"], "high")
+        self.assertEqual(
+            result["issues"][0]["explanation"],
+            "The same operation is repeated.",
+        )
+        self.assertEqual(result["issues"][0]["recommendation"], "Extract a helper.")
+        self.assertEqual(result["issues"][0]["beginner_explanation"], {
+            "problem": "",
+            "cause": "",
+            "impact": "",
+            "fix": "",
+            "example": "",
+            "concept": "",
+        })
+
+    def test_severity_aliases_preserve_low_findings_as_actionable(self):
+        cases = (
+            (" HIGH ", "error", "high"),
+            (" MEDIUM ", "warning", "medium"),
+            (" LOW ", "warning", "medium"),
+            (" INFO ", "info", "info"),
+        )
+        for value, expected_severity, expected_risk in cases:
+            with self.subTest(value=value):
+                payload = deepcopy(self.valid_payload)
+                payload["issues"][0]["severity"] = value
+                result = self._parse(payload)
+                self.assertEqual(result["issues"][0]["severity"], expected_severity)
+                self.assertEqual(result["overall_risk"], expected_risk)
+
+    def test_team_standard_categories_map_to_quality(self):
+        for category in ("general", "error-handling", "architecture", "performance"):
+            with self.subTest(category=category):
+                payload = deepcopy(self.valid_payload)
+                payload["issues"][0]["category"] = category
+                result = self._parse(payload)
+                self.assertEqual(result["issues"][0]["category"], "quality")
+
+    def test_prompt_and_validator_share_all_source_values(self):
+        source_schema = _SYSTEM_PROMPT.split('"source":', 1)[1].splitlines()[0]
+        for source in _ALLOWED_SOURCES:
+            with self.subTest(source=source):
+                self.assertIn(source, source_schema)
+                payload = deepcopy(self.valid_payload)
+                payload["issues"][0]["source"] = source
+                self._parse(payload)
+
+    def test_missing_and_null_beginner_explanation_are_empty(self):
+        for beginner in ("missing", None):
+            with self.subTest(beginner=beginner):
+                payload = deepcopy(self.valid_payload)
+                if beginner == "missing":
+                    payload["issues"][0].pop("beginner_explanation")
+                else:
+                    payload["issues"][0]["beginner_explanation"] = beginner
+                result = self._parse(payload)
+                self.assertEqual(
+                    result["issues"][0]["beginner_explanation"],
+                    {
+                        "problem": "",
+                        "cause": "",
+                        "impact": "",
+                        "fix": "",
+                        "example": "",
+                        "concept": "",
+                    },
+                )
+
+    def test_invalid_beginner_explanation_shapes_are_rejected(self):
+        cases = (
+            (["not", "an", "object"], "issues[0].beginner_explanation", "type"),
+            (
+                {"problem": None},
+                "issues[0].beginner_explanation.problem",
+                "type",
+            ),
+            (
+                {"concept": 42},
+                "issues[0].beginner_explanation.concept",
+                "type",
+            ),
+        )
+        for beginner, field, detail in cases:
+            with self.subTest(beginner=beginner):
+                payload = deepcopy(self.valid_payload)
+                payload["issues"][0]["beginner_explanation"] = beginner
+                with self.assertRaises(_InvalidAIResponse) as raised:
+                    self._parse(payload)
+                self.assertEqual(raised.exception.reason, "schema")
+                self.assertEqual(raised.exception.field, field)
+                self.assertEqual(raised.exception.detail, detail)
+
+    def test_schema_errors_identify_field_and_reason_without_coercion(self):
+        cases = (
+            ("overall_risk", lambda p: p.update(overall_risk=1), "overall_risk", "type"),
+            ("summary type", lambda p: p.update(summary=1), "summary", "type"),
+            ("summary empty", lambda p: p.update(summary="  "), "summary", "empty"),
+            ("issues type", lambda p: p.update(issues={}), "issues", "type"),
+            (
+                "issue type",
+                lambda p: p.update(issues=["bad issue"]),
+                "issues[0]",
+                "type",
+            ),
+            (
+                "severity",
+                lambda p: p["issues"][0].update(severity="urgent"),
+                "issues[0].severity",
+                "unsupported_value",
+            ),
+            (
+                "category",
+                lambda p: p["issues"][0].update(category="unapproved"),
+                "issues[0].category",
+                "unsupported_value",
+            ),
+            (
+                "line",
+                lambda p: p["issues"][0].update(line="4"),
+                "issues[0].line",
+                "type_or_range",
+            ),
+            (
+                "source",
+                lambda p: p["issues"][0].update(source="unapproved"),
+                "issues[0].source",
+                "unsupported_value",
+            ),
+            (
+                "confidence",
+                lambda p: p["issues"][0].update(confidence="certain"),
+                "issues[0].confidence",
+                "unsupported_value",
+            ),
+            (
+                "title missing",
+                lambda p: p["issues"][0].pop("title"),
+                "issues[0].title",
+                "missing",
+            ),
+            (
+                "title type",
+                lambda p: p["issues"][0].update(title=3),
+                "issues[0].title",
+                "type",
+            ),
+            (
+                "explanation missing",
+                lambda p: p["issues"][0].pop("explanation"),
+                "issues[0].explanation",
+                "missing",
+            ),
+            (
+                "explanation empty",
+                lambda p: p["issues"][0].update(explanation=" "),
+                "issues[0].explanation",
+                "empty",
+            ),
+            (
+                "recommendation missing",
+                lambda p: p["issues"][0].pop("recommendation"),
+                "issues[0].recommendation",
+                "missing",
+            ),
+        )
+        for name, mutate, field, detail in cases:
+            with self.subTest(name=name):
+                payload = deepcopy(self.valid_payload)
+                mutate(payload)
+                with self.assertRaises(_InvalidAIResponse) as raised:
+                    self._parse(payload)
+                self.assertEqual(raised.exception.reason, "schema")
+                self.assertEqual(raised.exception.field, field)
+                self.assertEqual(raised.exception.detail, detail)
+
+    def test_aliases_do_not_make_explanation_or_recommendation_optional(self):
+        for field, alias, value in (
+            ("explanation", "description", "An explanation."),
+            ("recommendation", "fix", "A fix."),
+        ):
+            with self.subTest(field=field):
+                payload = deepcopy(self.valid_payload)
+                payload["issues"][0].pop(field)
+                payload["issues"][0][alias] = value
+                parsed = self._parse(payload)
+                self.assertEqual(parsed["issues"][0][field], value)
+
+                payload["issues"][0].pop(alias)
+                with self.assertRaises(_InvalidAIResponse) as raised:
+                    self._parse(payload)
+                self.assertEqual(raised.exception.field, f"issues[0].{field}")
+                self.assertEqual(raised.exception.detail, "missing")
+
+    def test_invalid_canonical_text_field_does_not_fall_back_to_alias(self):
+        payload = deepcopy(self.valid_payload)
+        payload["issues"][0]["explanation"] = None
+        payload["issues"][0]["description"] = "A valid alias."
+        with self.assertRaises(_InvalidAIResponse) as raised:
+            self._parse(payload)
+        self.assertEqual(raised.exception.field, "issues[0].explanation")
+        self.assertEqual(raised.exception.detail, "type")
+
+    def test_invalid_explanation_and_recommendation_alias_types_are_rejected(self):
+        cases = (
+            ("explanation", "description", None),
+            ("explanation", "description", []),
+            ("recommendation", "suggested_fix", None),
+            ("recommendation", "fix", {}),
+        )
+        for field, alias, value in cases:
+            with self.subTest(field=field, alias=alias, value=value):
+                payload = deepcopy(self.valid_payload)
+                payload["issues"][0].pop(field)
+                payload["issues"][0][alias] = value
+                with self.assertRaises(_InvalidAIResponse) as raised:
+                    self._parse(payload)
+                self.assertEqual(raised.exception.reason, "schema")
+                self.assertEqual(raised.exception.field, f"issues[0].{field}")
+                self.assertEqual(raised.exception.detail, "type")
+
+    def test_schema_diagnostics_do_not_log_response_source_or_drop_static_findings(self):
+        response_sentinel = "response_value_must_not_be_logged"
+        source_sentinel = "source_code_must_not_be_logged"
+        invalid_payload = deepcopy(self.valid_payload)
+        invalid_payload["issues"][0]["line"] = response_sentinel
+        client = Mock()
+        client.chat.completions.create.side_effect = [
+            _completion(json.dumps(invalid_payload)),
+            _completion(json.dumps(invalid_payload)),
+        ]
+        with patch("app.services.ai_reviewer._get_client", return_value=client):
+            with self.assertLogs("app.services.ai_reviewer", level="WARNING") as logs:
+                result = run_ai_review(
+                    code=f"{source_sentinel} = 1\nsecond = 2\nthird = 3\ncall(value)\n",
+                    language="python",
+                    project_name="test-project",
+                    static_issues=[self.static_issue],
+                )
+
+        diagnostic_log = "\n".join(logs.output)
+        self.assertIn("field=issues[0].line", diagnostic_log)
+        self.assertIn("detail=type_or_range", diagnostic_log)
+        self.assertNotIn(response_sentinel, diagnostic_log)
+        self.assertNotIn(source_sentinel, diagnostic_log)
+        self.assertEqual(result["issues"], [])
+        self.assertEqual(result["static_issues"], [self.static_issue])
+        self.assertEqual(result["failure_category"], "response_schema")
+        retry_prompt = client.chat.completions.create.call_args_list[1].kwargs["messages"][1]["content"]
+        self.assertIn("issues[0].line", retry_prompt)
+        self.assertNotIn(response_sentinel, retry_prompt)
 
     def test_findings_with_nonexistent_symbols_are_rejected_after_retry(self):
         invalid_payload = {
