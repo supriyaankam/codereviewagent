@@ -3,10 +3,12 @@ import { afterEach, test } from 'node:test';
 
 import {
   getLatestReview,
+  getReviewHistoryPage,
   getReview,
   getReviewDetailPath,
   getSavedIssueCount,
   hydrateReviewSession,
+  deleteReview,
   saveReviewAutoFix,
   submitReview,
 } from '../src/services/reviewService.js';
@@ -15,6 +17,125 @@ const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+test('deleteReview sends an authenticated DELETE request for the selected review', async () => {
+  let requestUrl;
+  let requestOptions;
+  globalThis.fetch = async (url, options) => {
+    requestUrl = url;
+    requestOptions = options;
+    return new Response(null, { status: 204 });
+  };
+
+  await deleteReview('review/id 1', {
+    getIdToken: async () => 'test-token',
+  });
+
+  assert.equal(requestUrl, '/api/reviews/review%2Fid%201');
+  assert.equal(requestOptions.method, 'DELETE');
+  assert.equal(requestOptions.headers.Authorization, 'Bearer test-token');
+});
+
+test('deleteReview reports backend errors and requires a review ID', async () => {
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ detail: 'Review not found.' }),
+    { status: 404, headers: { 'Content-Type': 'application/json' } },
+  );
+
+  await assert.rejects(
+    deleteReview('missing-review', { getIdToken: async () => 'test-token' }),
+    /Review not found/,
+  );
+  await assert.rejects(
+    deleteReview('', { getIdToken: async () => 'test-token' }),
+    /Review ID is required/,
+  );
+});
+
+test('getReviewHistoryPage requests the authenticated user page with an optional cursor', async () => {
+  let requestUrl;
+  let requestOptions;
+  globalThis.fetch = async (url, options) => {
+    requestUrl = url;
+    requestOptions = options;
+    return new Response(JSON.stringify({
+      reviews: [{ id: 'review-1' }],
+      next_cursor: 'cursor-2',
+      total_count: 11,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const page = await getReviewHistoryPage({
+    uid: 'user 1',
+    getIdToken: async () => 'history-token',
+  }, 'cursor/2');
+
+  assert.equal(
+    requestUrl,
+    '/api/reviews/page?user_id=user+1&cursor=cursor%2F2',
+  );
+  assert.equal(requestOptions.headers.Authorization, 'Bearer history-token');
+  assert.deepEqual(page.reviews, [{ id: 'review-1' }]);
+  assert.equal(page.total_count, 11);
+});
+
+test('getReviewHistoryPage omits a missing cursor and reports invalid cursor status', async () => {
+  let requestUrl;
+  globalThis.fetch = async (url) => {
+    requestUrl = url;
+    return new Response(JSON.stringify({
+      reviews: [],
+      next_cursor: null,
+      total_count: 0,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  await getReviewHistoryPage({
+    uid: 'user-1',
+    getIdToken: async () => 'history-token',
+  });
+  assert.equal(requestUrl, '/api/reviews/page?user_id=user-1');
+
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ detail: 'Invalid review cursor.' }),
+    { status: 400, headers: { 'Content-Type': 'application/json' } },
+  );
+  await assert.rejects(
+    getReviewHistoryPage(
+      { uid: 'user-1', getIdToken: async () => 'history-token' },
+      'invalid',
+    ),
+    (error) => error.message === 'Invalid review cursor.' && error.status === 400,
+  );
+});
+
+test('getReviewHistoryPage rejects missing users and malformed response envelopes', async () => {
+  await assert.rejects(getReviewHistoryPage(null), /Sign in/);
+  await assert.rejects(
+    getReviewHistoryPage({ getIdToken: async () => 'history-token' }),
+    /Sign in/,
+  );
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    reviews: [],
+    next_cursor: null,
+    total_count: '0',
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  await assert.rejects(
+    getReviewHistoryPage({
+      uid: 'user-1',
+      getIdToken: async () => 'history-token',
+    }),
+    /response was invalid/,
+  );
 });
 
 test('accepts a review only after the API confirms Firestore persistence', async () => {

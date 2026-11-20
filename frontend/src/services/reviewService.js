@@ -58,9 +58,73 @@ async function authenticatedReviewRequest(path, currentUser, options = {}) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(data.detail || `Saved review request failed (HTTP ${response.status}).`);
+    const error = new Error(
+      data.detail || `Saved review request failed (HTTP ${response.status}).`,
+    );
+    error.status = response.status;
+    throw error;
   }
   return data;
+}
+
+export async function getReviewHistoryPage(currentUser, cursor = null) {
+  if (!currentUser?.uid) throw new Error('Sign in to access saved reviews.');
+
+  const params = new URLSearchParams({ user_id: currentUser.uid });
+  if (cursor) params.set('cursor', cursor);
+  const page = await authenticatedReviewRequest(
+    `/api/reviews/page?${params.toString()}`,
+    currentUser,
+  );
+  if (
+    !page
+    || !Array.isArray(page.reviews)
+    || !Number.isInteger(page.total_count)
+    || page.total_count < 0
+    || !(page.next_cursor === null || typeof page.next_cursor === 'string')
+  ) {
+    throw new Error('The review history response was invalid.');
+  }
+  return page;
+}
+
+export async function getDeletedReviewHistoryPage(currentUser, cursor = null) {
+  if (!currentUser?.uid) throw new Error('Sign in to access Recently Deleted reviews.');
+
+  const params = new URLSearchParams({ user_id: currentUser.uid });
+  if (cursor) params.set('cursor', cursor);
+  const page = await authenticatedReviewRequest(
+    `/api/reviews/trash/page?${params.toString()}`,
+    currentUser,
+  );
+  if (
+    !page
+    || !Array.isArray(page.reviews)
+    || !Number.isInteger(page.total_count)
+    || page.total_count < 0
+    || !(page.next_cursor === null || typeof page.next_cursor === 'string')
+  ) {
+    throw new Error('The Recently Deleted response was invalid.');
+  }
+  return page;
+}
+
+export async function restoreDeletedReview(reviewId, currentUser) {
+  if (!reviewId) throw new Error('Review ID is required.');
+  return authenticatedReviewRequest(
+    `/api/reviews/trash/${encodeURIComponent(reviewId)}/restore`,
+    currentUser,
+    { method: 'POST' },
+  );
+}
+
+export async function permanentlyDeleteReview(reviewId, currentUser) {
+  if (!reviewId) throw new Error('Review ID is required.');
+  return authenticatedReviewRequest(
+    `/api/reviews/trash/${encodeURIComponent(reviewId)}`,
+    currentUser,
+    { method: 'DELETE' },
+  );
 }
 
 export async function getLatestReview(currentUser) {
@@ -71,6 +135,15 @@ export async function getReview(reviewId, currentUser) {
   return authenticatedReviewRequest(
     `/api/reviews/${encodeURIComponent(reviewId)}`,
     currentUser,
+  );
+}
+
+export async function deleteReview(reviewId, currentUser) {
+  if (!reviewId) throw new Error('Review ID is required.');
+  return authenticatedReviewRequest(
+    `/api/reviews/${encodeURIComponent(reviewId)}`,
+    currentUser,
+    { method: 'DELETE' },
   );
 }
 

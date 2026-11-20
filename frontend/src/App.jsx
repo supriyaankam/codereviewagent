@@ -12,6 +12,7 @@ import Dashboard           from './pages/Dashboard';
 import CodeReview          from './pages/CodeReview';
 import AutoFix             from './pages/AutoFix';
 import ReviewHistory       from './pages/ReviewHistory';
+import RecentlyDeleted     from './pages/RecentlyDeleted';
 import ProjectHistory      from './pages/ProjectHistory';
 import TeamStandards       from './pages/TeamStandards';
 
@@ -36,6 +37,7 @@ export default function App() {
             <Route path="/review"    element={<CodeReview />} />
             <Route path="/autofix"   element={<AutoFix />} />
             <Route path="/history"   element={<ReviewHistory />} />
+            <Route path="/recently-deleted" element={<RecentlyDeleted />} />
             <Route path="/project-history" element={<ProjectHistory />} />
             <Route path="/standards" element={<TeamStandards />} />
           </Route>

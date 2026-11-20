@@ -5,15 +5,27 @@ from app.auth import require_authenticated_user
 from app.schemas import (
     CodeReviewCreate,
     CodeReviewResponse,
+    DeletedReviewHistoryPageResponse,
     ReviewAutoFixUpdate,
+    ReviewHistoryPageResponse,
 )
 from app.services.firebase_service import (
+    ActiveReviewConflictError,
+    ExpiredTrashReviewError,
+    ReviewAlreadyInTrashError,
+    ReviewNotFoundError,
     create_code_review,
     get_code_reviews,
+    get_code_reviews_page,
+    get_deleted_code_reviews_page,
     get_code_review_by_id,
+    move_code_review_to_trash,
+    permanently_delete_trashed_review,
+    restore_deleted_code_review,
     get_issues_by_review,
     get_feedback,
     update_code_review,
+    InvalidReviewCursor,
     firebase_available,
 )
 from app.services.auto_fix_service import auto_fix_code, auto_fix_finding
@@ -172,6 +184,121 @@ def get_reviews_route(
         return get_code_reviews(user_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/page", response_model=ReviewHistoryPageResponse)
+def get_reviews_page_route(
+    user_id: str = Query(..., description="Firebase UID"),
+    cursor: Optional[str] = Query(default=None, max_length=4096),
+    authenticated_user: str = Depends(require_authenticated_user),
+):
+    """Return one cursor-paginated page of reviews for the authenticated user."""
+    if user_id != authenticated_user:
+        raise HTTPException(status_code=403, detail="You may only access your own review history.")
+    if not firebase_available():
+        raise _NO_FIREBASE
+    try:
+        return get_code_reviews_page(user_id, cursor)
+    except InvalidReviewCursor as exc:
+        raise HTTPException(status_code=400, detail="Invalid review cursor.") from exc
+    except Exception as exc:
+        logger.exception("[reviews/page] failed for user=%s", user_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Could not load review history.",
+        ) from exc
+
+
+@router.get("/trash/page", response_model=DeletedReviewHistoryPageResponse)
+def get_deleted_reviews_page_route(
+    user_id: str = Query(..., description="Firebase UID"),
+    cursor: Optional[str] = Query(default=None, max_length=4096),
+    authenticated_user: str = Depends(require_authenticated_user),
+):
+    """Return one cursor-paginated page of unexpired Trash reviews."""
+    if user_id != authenticated_user:
+        raise HTTPException(status_code=403, detail="You may only access your own review history.")
+    if not firebase_available():
+        raise _NO_FIREBASE
+    try:
+        return get_deleted_code_reviews_page(user_id, cursor)
+    except InvalidReviewCursor as exc:
+        raise HTTPException(status_code=400, detail="Invalid Trash cursor.") from exc
+    except Exception as exc:
+        logger.exception("[reviews/trash/page] failed for user=%s", user_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Could not load Recently Deleted reviews.",
+        ) from exc
+
+
+@router.post("/trash/{review_id}/restore", status_code=204)
+def restore_deleted_review_route(
+    review_id: str,
+    authenticated_user: str = Depends(require_authenticated_user),
+):
+    """Restore an unexpired Trash review to its original Firestore ID."""
+    if not firebase_available():
+        raise _NO_FIREBASE
+    try:
+        restore_deleted_code_review(review_id, authenticated_user)
+    except ReviewNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Deleted review not found.") from exc
+    except ExpiredTrashReviewError as exc:
+        raise HTTPException(status_code=410, detail="This deleted review has expired.") from exc
+    except ActiveReviewConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="An active review with this ID already exists.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("[reviews/trash/restore] failed for review_id=%s", review_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Could not restore the deleted review.",
+        ) from exc
+
+
+@router.delete("/trash/{review_id}", status_code=204)
+def permanently_delete_trashed_review_route(
+    review_id: str,
+    authenticated_user: str = Depends(require_authenticated_user),
+):
+    """Permanently delete only the caller's Trash review document."""
+    if not firebase_available():
+        raise _NO_FIREBASE
+    try:
+        permanently_delete_trashed_review(review_id, authenticated_user)
+    except ReviewNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Deleted review not found.") from exc
+    except Exception as exc:
+        logger.exception("[reviews/trash/delete] failed for review_id=%s", review_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Could not permanently delete the review.",
+        ) from exc
+
+
+@router.delete("/{review_id}", status_code=204)
+def delete_review_route(
+    review_id: str,
+    authenticated_user: str = Depends(require_authenticated_user),
+):
+    """Delete a review belonging to the authenticated user."""
+    if not firebase_available():
+        raise _NO_FIREBASE
+    try:
+        move_code_review_to_trash(review_id, authenticated_user)
+    except ReviewNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Review not found.") from exc
+    except ReviewAlreadyInTrashError as exc:
+        raise HTTPException(status_code=409, detail="Review already exists in Trash.") from exc
+    except Exception as exc:
+        logger.exception("[reviews/delete] failed for review_id=%s", review_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Could not delete the review.",
+        ) from exc
 
 
 def _first_saved_value(record: dict, *field_names: str):

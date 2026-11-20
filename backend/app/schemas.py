@@ -50,6 +50,18 @@ class CodeReviewResponse(BaseModel):
     updated_at:     Optional[str] = None
 
 
+class ReviewHistoryPageResponse(BaseModel):
+    reviews: list[CodeReviewResponse]
+    next_cursor: Optional[str] = None
+    total_count: int
+
+
+class DeletedReviewHistoryPageResponse(BaseModel):
+    reviews: list[dict]
+    next_cursor: Optional[str] = None
+    total_count: int
+
+
 class ReviewSessionResponse(CodeReviewResponse):
     review_id: Optional[str] = None
     completed_at: Optional[str] = None

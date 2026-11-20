@@ -15,15 +15,22 @@ Collections:
   users, projects, code_reviews, review_issues, feedback, team_standards
 """
 
-import os
+import base64
+import binascii
+import hashlib
+import hmac
+import json
 import logging
-from datetime import datetime, timezone
+import os
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import firebase_admin
 from firebase_admin import credentials, firestore
-from google.cloud.firestore_v1 import SERVER_TIMESTAMP
+from google.api_core.datetime_helpers import DatetimeWithNanoseconds
+from google.cloud.firestore_v1 import LastUpdateOption, SERVER_TIMESTAMP
 
 logger = logging.getLogger(__name__)
 
@@ -190,9 +197,41 @@ def firebase_health_check() -> dict[str, Any]:
 USERS          = "users"
 PROJECTS       = "projects"
 CODE_REVIEWS   = "code_reviews"
+DELETED_CODE_REVIEWS = "deleted_code_reviews"
 REVIEW_ISSUES  = "review_issues"
 FEEDBACK       = "feedback"
 TEAM_STANDARDS = "team_standards"
+
+REVIEW_PAGE_SIZE = 10
+_FIRESTORE_BATCH_MAX_WRITES = 500
+_REVIEW_CURSOR_VERSION = 1
+_REVIEW_CURSOR_MAX_LENGTH = 4096
+_REVIEW_CURSOR_PATTERN = re.compile(r"([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})")
+_TRASH_CURSOR_VERSION = 1
+
+
+class InvalidReviewCursor(ValueError):
+    """Raised when a Review History cursor is malformed or belongs to another user."""
+
+
+class ReviewCursorConfigurationError(RuntimeError):
+    """Raised when the stable signing secret for Review History cursors is missing."""
+
+
+class ReviewNotFoundError(LookupError):
+    """Raised when a review is missing or is not owned by the caller."""
+
+
+class ReviewAlreadyInTrashError(RuntimeError):
+    """Raised when a review ID already exists in Trash."""
+
+
+class ActiveReviewConflictError(RuntimeError):
+    """Raised when restoring would overwrite an active review."""
+
+
+class ExpiredTrashReviewError(RuntimeError):
+    """Raised when an expired Trash review cannot be restored."""
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -356,10 +395,409 @@ def get_code_reviews(user_id: str) -> list[dict]:
     return results
 
 
+def _get_review_cursor_secret() -> bytes:
+    secret = os.getenv("REVIEW_CURSOR_SECRET", "").strip()
+    if not secret:
+        raise ReviewCursorConfigurationError(
+            "REVIEW_CURSOR_SECRET is not configured; set a stable secret for Review History pagination."
+        )
+    return secret.encode("utf-8")
+
+
+def _sign_review_cursor(payload: str, secret: bytes) -> str:
+    signature = hmac.new(secret, payload.encode("ascii"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+
+
+def _encode_review_cursor(user_id: str, document: Any, secret: bytes) -> str:
+    created_at = document.get("created_at")
+    if isinstance(created_at, datetime):
+        rfc3339 = getattr(created_at, "rfc3339", None)
+        if callable(rfc3339):
+            encoded_created_at = {"type": "timestamp", "value": rfc3339()}
+        else:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            else:
+                created_at = created_at.astimezone(timezone.utc)
+            encoded_created_at = {
+                "type": "timestamp",
+                "value": created_at.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            }
+    elif isinstance(created_at, str):
+        encoded_created_at = {"type": "string", "value": created_at}
+    else:
+        raise RuntimeError("Review has an unsupported created_at value for pagination.")
+
+    payload = {
+        "version": _REVIEW_CURSOR_VERSION,
+        "user_id": user_id,
+        "created_at": encoded_created_at,
+        "document_id": document.id,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    )
+    encoded_payload = encoded.decode("ascii").rstrip("=")
+    signature = _sign_review_cursor(encoded_payload, secret)
+    return f"{encoded_payload}.{signature}"
+
+
+def _decode_review_cursor(cursor: str, user_id: str, secret: bytes) -> tuple[Any, str]:
+    if (
+        not cursor
+        or len(cursor) > _REVIEW_CURSOR_MAX_LENGTH
+        or _REVIEW_CURSOR_PATTERN.fullmatch(cursor) is None
+    ):
+        raise InvalidReviewCursor("Invalid review cursor.")
+
+    encoded_payload, signature = cursor.split(".", 1)
+    expected_signature = _sign_review_cursor(encoded_payload, secret)
+    if not hmac.compare_digest(signature, expected_signature):
+        raise InvalidReviewCursor("Invalid review cursor.")
+
+    try:
+        raw_cursor = base64.b64decode(
+            encoded_payload + "=" * (-len(encoded_payload) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        if base64.urlsafe_b64encode(raw_cursor).decode("ascii").rstrip("=") != encoded_payload:
+            raise InvalidReviewCursor("Invalid review cursor.")
+        payload = json.loads(raw_cursor.decode("utf-8"))
+    except (
+        binascii.Error,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+    ) as exc:
+        raise InvalidReviewCursor("Invalid review cursor.") from exc
+
+    if not isinstance(payload, dict) or set(payload) != {
+        "version", "user_id", "created_at", "document_id",
+    }:
+        raise InvalidReviewCursor("Invalid review cursor.")
+    if type(payload["version"]) is not int or payload["version"] != _REVIEW_CURSOR_VERSION:
+        raise InvalidReviewCursor("Invalid review cursor.")
+    if payload["user_id"] != user_id:
+        raise InvalidReviewCursor("Invalid review cursor.")
+
+    encoded_created_at = payload["created_at"]
+    if (
+        not isinstance(encoded_created_at, dict)
+        or set(encoded_created_at) != {"type", "value"}
+        or not isinstance(encoded_created_at["value"], str)
+    ):
+        raise InvalidReviewCursor("Invalid review cursor.")
+
+    if encoded_created_at["type"] == "timestamp":
+        try:
+            created_at = DatetimeWithNanoseconds.from_rfc3339(encoded_created_at["value"])
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise InvalidReviewCursor("Invalid review cursor.") from exc
+    elif encoded_created_at["type"] == "string":
+        created_at = encoded_created_at["value"]
+    else:
+        raise InvalidReviewCursor("Invalid review cursor.")
+
+    document_id = payload["document_id"]
+    if (
+        not isinstance(document_id, str)
+        or not document_id
+        or "/" in document_id
+        or len(document_id.encode("utf-8")) > 1500
+    ):
+        raise InvalidReviewCursor("Invalid review cursor.")
+
+    return created_at, document_id
+
+
+def _trash_cursor_timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _encode_trash_cursor(user_id: str, document: Any, secret: bytes) -> str:
+    expires_at = _as_utc_datetime(document.get("expires_at"))
+    if expires_at is None:
+        raise RuntimeError("Trash review has an invalid expires_at timestamp.")
+    payload = {
+        "version": _TRASH_CURSOR_VERSION,
+        "scope": DELETED_CODE_REVIEWS,
+        "user_id": user_id,
+        "expires_at": _trash_cursor_timestamp(expires_at),
+        "document_id": document.id,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    return f"{encoded}.{_sign_review_cursor(encoded, secret)}"
+
+
+def _decode_trash_cursor(cursor: str, user_id: str, secret: bytes) -> tuple[datetime, str]:
+    if (
+        not cursor
+        or len(cursor) > _REVIEW_CURSOR_MAX_LENGTH
+        or _REVIEW_CURSOR_PATTERN.fullmatch(cursor) is None
+    ):
+        raise InvalidReviewCursor("Invalid Trash cursor.")
+
+    encoded_payload, signature = cursor.split(".", 1)
+    if not hmac.compare_digest(signature, _sign_review_cursor(encoded_payload, secret)):
+        raise InvalidReviewCursor("Invalid Trash cursor.")
+
+    try:
+        raw_cursor = base64.b64decode(
+            encoded_payload + "=" * (-len(encoded_payload) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        if base64.urlsafe_b64encode(raw_cursor).decode("ascii").rstrip("=") != encoded_payload:
+            raise InvalidReviewCursor("Invalid Trash cursor.")
+        payload = json.loads(raw_cursor.decode("utf-8"))
+    except (
+        binascii.Error,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+    ) as exc:
+        raise InvalidReviewCursor("Invalid Trash cursor.") from exc
+
+    if not isinstance(payload, dict) or set(payload) != {
+        "version", "scope", "user_id", "expires_at", "document_id",
+    }:
+        raise InvalidReviewCursor("Invalid Trash cursor.")
+    if type(payload["version"]) is not int or payload["version"] != _TRASH_CURSOR_VERSION:
+        raise InvalidReviewCursor("Invalid Trash cursor.")
+    if payload["scope"] != DELETED_CODE_REVIEWS or payload["user_id"] != user_id:
+        raise InvalidReviewCursor("Invalid Trash cursor.")
+    if not isinstance(payload["expires_at"], str):
+        raise InvalidReviewCursor("Invalid Trash cursor.")
+    try:
+        expires_at = DatetimeWithNanoseconds.from_rfc3339(payload["expires_at"])
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise InvalidReviewCursor("Invalid Trash cursor.") from exc
+
+    document_id = payload["document_id"]
+    if (
+        not isinstance(document_id, str)
+        or not document_id
+        or "/" in document_id
+        or len(document_id.encode("utf-8")) > 1500
+    ):
+        raise InvalidReviewCursor("Invalid Trash cursor.")
+    return expires_at, document_id
+
+
+def _as_utc_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _review_owner_id(data: dict) -> Any:
+    return data["author_id"] if "author_id" in data else data.get("authorId")
+
+
+def get_deleted_code_reviews_page(user_id: str, cursor: str | None = None) -> dict:
+    """Return one signed-cursor page of unexpired Trash reviews for the owner."""
+    secret = _get_review_cursor_secret()
+    cursor_values = _decode_trash_cursor(cursor, user_id, secret) if cursor is not None else None
+    now = _utc_now()
+    db = get_db()
+    collection = db.collection(DELETED_CODE_REVIEWS)
+    owner_documents = {}
+    for owner_field in ("author_id", "authorId"):
+        for document in collection.where(owner_field, "==", user_id).stream():
+            owner_documents[document.id] = document
+
+    reviews = []
+    expired_documents = []
+    for document in owner_documents.values():
+        data = document.to_dict() or {}
+        if _review_owner_id(data) != user_id:
+            continue
+        expires_at = _as_utc_datetime(data.get("expires_at"))
+        if expires_at is None:
+            continue
+        if expires_at <= now:
+            if document.update_time is None:
+                raise RuntimeError(
+                    "Cannot safely clean an expired Trash review without its update time."
+                )
+            expired_documents.append(document)
+            continue
+        key = (expires_at, document.id)
+        reviews.append((key, document))
+
+    for offset in range(0, len(expired_documents), _FIRESTORE_BATCH_MAX_WRITES):
+        batch = db.batch()
+        for document in expired_documents[offset:offset + _FIRESTORE_BATCH_MAX_WRITES]:
+            reference = collection.document(document.id)
+            batch.delete(reference, option=LastUpdateOption(document.update_time))
+        batch.commit()
+
+    total_count = len(reviews)
+    if cursor_values is not None:
+        reviews = [item for item in reviews if item[0] < cursor_values]
+    reviews.sort(key=lambda item: item[0], reverse=True)
+    page_documents = [document for _, document in reviews[:REVIEW_PAGE_SIZE + 1]]
+    page_documents = page_documents[:REVIEW_PAGE_SIZE]
+    next_cursor = (
+        _encode_trash_cursor(user_id, page_documents[-1], secret)
+        if len(reviews) > REVIEW_PAGE_SIZE
+        else None
+    )
+    return {
+        "reviews": [_doc_to_dict(document) for document in page_documents],
+        "next_cursor": next_cursor,
+        "total_count": total_count,
+    }
+
+
+def get_code_reviews_page(user_id: str, cursor: str | None = None) -> dict:
+    """Return one owner-filtered Review History page and its value-based cursor."""
+    secret = _get_review_cursor_secret()
+    cursor_values = (
+        _decode_review_cursor(cursor, user_id, secret)
+        if cursor is not None
+        else None
+    )
+    db = get_db()
+
+    owner_query = db.collection(CODE_REVIEWS).where("author_id", "==", user_id)
+    count_rows = owner_query.count(alias="total_count").get()
+    if not count_rows or not count_rows[0]:
+        raise RuntimeError("Firestore returned no review count result.")
+    total_count = int(count_rows[0][0].value)
+
+    page_query = (
+        db.collection(CODE_REVIEWS)
+        .where("author_id", "==", user_id)
+        .order_by("created_at", direction=firestore.Query.DESCENDING)
+        .order_by("__name__", direction=firestore.Query.DESCENDING)
+    )
+    if cursor_values is not None:
+        created_at, document_id = cursor_values
+        page_query = page_query.start_after([
+            created_at,
+            db.collection(CODE_REVIEWS).document(document_id),
+        ])
+
+    # Read one lookahead document so next_cursor is only returned when another page exists.
+    documents = list(page_query.limit(REVIEW_PAGE_SIZE + 1).stream())
+    page_documents = documents[:REVIEW_PAGE_SIZE]
+    next_cursor = (
+        _encode_review_cursor(user_id, page_documents[-1], secret)
+        if len(documents) > REVIEW_PAGE_SIZE
+        else None
+    )
+    return {
+        "reviews": [_doc_to_dict(document) for document in page_documents],
+        "next_cursor": next_cursor,
+        "total_count": total_count,
+    }
+
+
 def get_code_review_by_id(review_id: str) -> dict | None:
     db  = get_db()
     doc = db.collection(CODE_REVIEWS).document(review_id).get()
     return _doc_to_dict(doc) if doc.exists else None
+
+
+def delete_code_review(review_id: str) -> None:
+    """Delete only the code review document with the given ID."""
+    db = get_db()
+    db.collection(CODE_REVIEWS).document(review_id).delete()
+
+
+def move_code_review_to_trash(review_id: str, user_id: str) -> None:
+    """Atomically move an owned review to Trash without changing its document ID."""
+    db = get_db()
+    review_ref = db.collection(CODE_REVIEWS).document(review_id)
+    trash_ref = db.collection(DELETED_CODE_REVIEWS).document(review_id)
+
+    @firestore.transactional
+    def move_review_transaction(transaction):
+        review_snapshot = review_ref.get(transaction=transaction)
+        trash_snapshot = trash_ref.get(transaction=transaction)
+        if not review_snapshot.exists:
+            raise ReviewNotFoundError("Review not found.")
+
+        review_data = review_snapshot.to_dict() or {}
+        if _review_owner_id(review_data) != user_id:
+            raise ReviewNotFoundError("Review not found.")
+        if trash_snapshot.exists:
+            raise ReviewAlreadyInTrashError("Review already exists in Trash.")
+
+        deleted_at = datetime.now(timezone.utc)
+        trash_data = dict(review_data)
+        if "author_id" not in trash_data:
+            trash_data["author_id"] = trash_data.get("authorId")
+        trash_data["deleted_at"] = deleted_at
+        trash_data["expires_at"] = deleted_at + timedelta(days=30)
+        transaction.set(trash_ref, trash_data)
+        transaction.delete(review_ref)
+
+    move_review_transaction(db.transaction())
+
+
+def restore_deleted_code_review(review_id: str, user_id: str) -> None:
+    """Atomically restore an owned, unexpired Trash review to its original ID."""
+    db = get_db()
+    trash_ref = db.collection(DELETED_CODE_REVIEWS).document(review_id)
+    review_ref = db.collection(CODE_REVIEWS).document(review_id)
+
+    @firestore.transactional
+    def restore_review_transaction(transaction):
+        trash_snapshot = trash_ref.get(transaction=transaction)
+        review_snapshot = review_ref.get(transaction=transaction)
+        if not trash_snapshot.exists:
+            raise ReviewNotFoundError("Deleted review not found.")
+
+        review_data = trash_snapshot.to_dict() or {}
+        if _review_owner_id(review_data) != user_id:
+            raise ReviewNotFoundError("Deleted review not found.")
+
+        expires_at = _as_utc_datetime(review_data.get("expires_at"))
+        if expires_at is None or expires_at <= datetime.now(timezone.utc):
+            raise ExpiredTrashReviewError("This deleted review has expired.")
+        if review_snapshot.exists:
+            raise ActiveReviewConflictError("An active review with this ID already exists.")
+
+        restored_data = dict(review_data)
+        restored_data.pop("deleted_at", None)
+        restored_data.pop("expires_at", None)
+        transaction.set(review_ref, restored_data)
+        transaction.delete(trash_ref)
+
+    restore_review_transaction(db.transaction())
+
+
+def permanently_delete_trashed_review(review_id: str, user_id: str) -> None:
+    """Permanently delete only an owned Trash review document."""
+    db = get_db()
+    trash_ref = db.collection(DELETED_CODE_REVIEWS).document(review_id)
+
+    @firestore.transactional
+    def permanently_delete_review_transaction(transaction):
+        trash_snapshot = trash_ref.get(transaction=transaction)
+        if not trash_snapshot.exists:
+            raise ReviewNotFoundError("Deleted review not found.")
+        if _review_owner_id(trash_snapshot.to_dict() or {}) != user_id:
+            raise ReviewNotFoundError("Deleted review not found.")
+        transaction.delete(trash_ref)
+
+    permanently_delete_review_transaction(db.transaction())
 
 
 # ── review_issues ─────────────────────────────────────────────────────────────
