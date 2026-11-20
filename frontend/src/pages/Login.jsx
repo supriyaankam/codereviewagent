@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { Eye, EyeOff } from 'lucide-react';
+import CodeGuardLogo from '../components/CodeGuardLogo';
 import { loginUser } from '../services/authService';
 import { useAuth } from '../context/AuthContext';
 
@@ -9,6 +11,7 @@ export default function Login() {
   const [form, setForm] = useState({ email: '', password: '' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [passwordVisible, setPasswordVisible] = useState(false);
 
   function handleChange(e) {
     setForm({ ...form, [e.target.name]: e.target.value });
@@ -40,8 +43,8 @@ export default function Login() {
 
           {/* Header */}
           <div className="text-center mb-4">
-            <div className="mb-3"><span className="fs-2">⚙</span></div>
-            <h4 className="fw-bold text-dark mb-1">Welcome back</h4>
+            <div className="mb-3"><CodeGuardLogo /></div>
+            <h4 className="fw-bold text-dark mb-1">Welcome</h4>
             <p className="text-secondary small">Sign in to Code Review Agent</p>
           </div>
 
@@ -78,13 +81,26 @@ export default function Login() {
 
             <div className="mb-4">
               <label htmlFor="password" className="form-label fw-medium small">Password</label>
-              <input
-                id="password" name="password" type="password"
-                className="form-control"
-                placeholder="••••••••"
-                value={form.password} onChange={handleChange}
-                autoComplete="current-password"
-              />
+              <div className="position-relative">
+                <input
+                  id="password" name="password" type={passwordVisible ? 'text' : 'password'}
+                  className="form-control pe-5"
+                  placeholder="••••••••"
+                  value={form.password} onChange={handleChange}
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  className="btn btn-link position-absolute top-50 end-0 translate-middle-y me-1 p-2 text-secondary text-decoration-none"
+                  aria-label={passwordVisible ? 'Hide password' : 'Show password'}
+                  aria-controls="password"
+                  onClick={() => setPasswordVisible(!passwordVisible)}
+                >
+                  {passwordVisible
+                    ? <EyeOff size={18} aria-hidden="true" />
+                    : <Eye size={18} aria-hidden="true" />}
+                </button>
+              </div>
             </div>
 
             <button type="submit" className="btn btn-primary w-100 fw-medium" disabled={loading}>
@@ -96,7 +112,7 @@ export default function Login() {
 
           <p className="text-center text-secondary small mt-4 mb-0">
             Don&apos;t have an account?{' '}
-            <Link to="/register" className="text-primary text-decoration-none fw-medium">Create one</Link>
+            <Link to="/register" className="text-primary text-decoration-none fw-medium">Register</Link>
           </p>
         </div>
       </div>

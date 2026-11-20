@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { Eye, EyeOff } from 'lucide-react';
+import CodeGuardLogo from '../components/CodeGuardLogo';
 import { registerUser } from '../services/authService';
 import { useAuth } from '../context/AuthContext';
 
@@ -9,6 +11,8 @@ export default function Register() {
   const [form, setForm] = useState({ name: '', email: '', password: '', confirm: '' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const [confirmVisible, setConfirmVisible] = useState(false);
 
   function handleChange(e) {
     setForm({ ...form, [e.target.name]: e.target.value });
@@ -54,7 +58,7 @@ export default function Register() {
 
           {/* Header */}
           <div className="text-center mb-4">
-            <div className="mb-3"><span className="fs-2">⚙</span></div>
+            <div className="mb-3"><CodeGuardLogo /></div>
             <h4 className="fw-bold text-dark mb-1">Create an account</h4>
             <p className="text-secondary small">Get started with Code Review Agent</p>
           </div>
@@ -103,26 +107,52 @@ export default function Register() {
 
             <div className="mb-3">
               <label htmlFor="password" className="form-label fw-medium small">Password</label>
-              <input
-                id="password" name="password" type="password"
-                className="form-control" placeholder="Min. 6 characters"
-                value={form.password} onChange={handleChange}
-                autoComplete="new-password"
-                minLength={6}
-                required
-              />
+              <div className="position-relative">
+                <input
+                  id="password" name="password" type={passwordVisible ? 'text' : 'password'}
+                  className="form-control pe-5" placeholder="Min. 6 characters"
+                  value={form.password} onChange={handleChange}
+                  autoComplete="new-password"
+                  minLength={6}
+                  required
+                />
+                <button
+                  type="button"
+                  className="btn btn-link position-absolute top-50 end-0 translate-middle-y me-1 p-2 text-secondary text-decoration-none"
+                  aria-label={passwordVisible ? 'Hide password' : 'Show password'}
+                  aria-controls="password"
+                  onClick={() => setPasswordVisible(!passwordVisible)}
+                >
+                  {passwordVisible
+                    ? <EyeOff size={18} aria-hidden="true" />
+                    : <Eye size={18} aria-hidden="true" />}
+                </button>
+              </div>
             </div>
 
             <div className="mb-4">
               <label htmlFor="confirm" className="form-label fw-medium small">Confirm password</label>
-              <input
-                id="confirm" name="confirm" type="password"
-                className="form-control" placeholder="••••••••"
-                value={form.confirm} onChange={handleChange}
-                autoComplete="new-password"
-                minLength={6}
-                required
-              />
+              <div className="position-relative">
+                <input
+                  id="confirm" name="confirm" type={confirmVisible ? 'text' : 'password'}
+                  className="form-control pe-5" placeholder="••••••••"
+                  value={form.confirm} onChange={handleChange}
+                  autoComplete="new-password"
+                  minLength={6}
+                  required
+                />
+                <button
+                  type="button"
+                  className="btn btn-link position-absolute top-50 end-0 translate-middle-y me-1 p-2 text-secondary text-decoration-none"
+                  aria-label={confirmVisible ? 'Hide confirm password' : 'Show confirm password'}
+                  aria-controls="confirm"
+                  onClick={() => setConfirmVisible(!confirmVisible)}
+                >
+                  {confirmVisible
+                    ? <EyeOff size={18} aria-hidden="true" />
+                    : <Eye size={18} aria-hidden="true" />}
+                </button>
+              </div>
             </div>
 
             <button type="submit" className="btn btn-primary w-100 fw-medium" disabled={loading}>

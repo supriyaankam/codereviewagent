@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { logoutUser } from '../services/authService';
 import { useAuth } from '../context/AuthContext';
+import CodeGuardLogo from './CodeGuardLogo';
 import '../styles/Layout.css';
 
 const navItems = [
@@ -32,10 +33,8 @@ export default function Layout() {
 
         {/* Brand */}
         <div className="sidebar-brand px-4 py-4">
-          <span className="sidebar-brand-icon me-2">⚙</span>
-          <span className="sidebar-brand-text">
-            Code Review<br /><small>Agent</small>
-          </span>
+          <span className="me-2 d-inline-flex"><CodeGuardLogo /></span>
+          <span className="sidebar-brand-text">CodeGuard AI</span>
         </div>
 
         {/* Nav links */}
